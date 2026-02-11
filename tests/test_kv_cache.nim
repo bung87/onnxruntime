@@ -128,30 +128,53 @@ proc encodeText(text: string): seq[int64] =
     # Fallback: return some default tokens
     return @[100'i64, 200, 300]
   
-  # Pre-tokenize: split on whitespace and punctuation
-  var tokens: seq[string] = @[]
+  # Pre-tokenize: split on whitespace and punctuation, but track if preceded by space
+  var tokens: seq[tuple[word: string, hasSpacePrefix: bool]] = @[]
   var current = ""
+  var wordHasSpacePrefix = false
+  var isFirstToken = true
+  
   for c in text:
     if c.isAlphaAscii or c.isDigit:
+      if current.len == 0:
+        # Starting a new word - check if previous char was space
+        wordHasSpacePrefix = not isFirstToken
       current.add(c)
     else:
       if current.len > 0:
-        tokens.add(current.toLowerAscii())
+        # First word doesn't get space prefix, subsequent words do
+        let hasPrefix = wordHasSpacePrefix
+        tokens.add((current.toLowerAscii(), hasPrefix))
+        isFirstToken = false
         current = ""
-      if not c.isSpaceAscii:
-        tokens.add($c)
+        wordHasSpacePrefix = false
+      if c.isSpaceAscii:
+        # Mark that next word should have space prefix
+        wordHasSpacePrefix = true
+      else:
+        # Punctuation doesn't get space prefix
+        tokens.add(($c, false))
+        isFirstToken = false
+        wordHasSpacePrefix = false
   if current.len > 0:
-    tokens.add(current.toLowerAscii())
+    let hasPrefix = wordHasSpacePrefix
+    tokens.add((current.toLowerAscii(), hasPrefix))
   
   # Apply BPE to each token
-  for token in tokens:
+  for (token, hasSpacePrefix) in tokens:
     let bpeTokens = bpeEncode(token)
+    var isFirstSubToken = true
     for bpeToken in bpeTokens:
-      let fullToken = if token != bpeToken: "Ġ" & bpeToken else: bpeToken
-      if TokenToId.hasKey(fullToken):
+      # Add Ġ prefix if this token should have a space before it
+      let fullToken = if hasSpacePrefix and isFirstSubToken: "Ġ" & bpeToken else: bpeToken
+      isFirstSubToken = false
+      # Prefer the token with the correct prefix when space is needed
+      if hasSpacePrefix and TokenToId.hasKey(fullToken):
         result.add(TokenToId[fullToken].int64)
       elif TokenToId.hasKey(bpeToken):
         result.add(TokenToId[bpeToken].int64)
+      elif TokenToId.hasKey(fullToken):
+        result.add(TokenToId[fullToken].int64)
       else:
         # Try character-level fallback
         for c in bpeToken:
@@ -164,22 +187,41 @@ proc decodeTokens(tokenIds: seq[int64]): string =
   if not TokenizerLoaded:
     return "[Tokenizer not loaded]"
   
-  var pieces: seq[string] = @[]
+  var result = ""
   for id in tokenIds:
     if IdToToken.hasKey(id.int):
-      var token = IdToToken[id.int]
-      # Handle GPT-2 style space marker
-      if token.startsWith("Ġ"):
-        token = " " & token[1..^1]
-      elif token.startsWith("Ċ"):
-        token = "\n" & token[1..^1]
-      elif token.startsWith("ĉ"):
-        token = "\t" & token[1..^1]
-      pieces.add(token)
+      let token = IdToToken[id.int]
+      # Handle GPT-2 style space marker (Ġ = space, Ċ = newline, etc.)
+      # Use byte comparison to avoid Unicode display issues
+      if token.len > 0:
+        let firstByte = token[0]
+        if firstByte == '\xc4':  # UTF-8 start byte for Ġ, Ċ, etc.
+          if token.len > 1:
+            let secondByte = token[1]
+            if secondByte == '\xa0':  # Ġ (U+0120) - space prefix
+              result.add(" ")  # Add space before token content
+              if token.len > 2:
+                result.add(token[2..^1])
+            elif secondByte == '\x8a':  # Ċ (U+010A) - newline prefix
+              result.add("\n")
+              if token.len > 2:
+                result.add(token[2..^1])
+            elif secondByte == '\x89':  # ĉ (U+0109) - tab prefix
+              result.add("\t")
+              if token.len > 2:
+                result.add(token[2..^1])
+            else:
+              result.add(token)
+          else:
+            result.add(token)
+        else:
+          result.add(token)
+      else:
+        result.add(token)
     else:
-      pieces.add(&"[{id}]")
+      result.add(&"[{id}]")
   
-  result = pieces.join("")
+  return result
 
 proc softmax(logits: seq[float32], temperature: float32 = 1.0): seq[float32] =
   ## Apply softmax with temperature to logits
@@ -344,7 +386,19 @@ suite "KV-Cache Text Generation Tests":
       # Show the token
       var tokenStr = &"[{nextToken}]"
       if IdToToken.hasKey(nextToken.int):
-        tokenStr = IdToToken[nextToken.int]
+        let rawToken = IdToToken[nextToken.int]
+        # Clean up display for special tokens using byte comparison
+        if rawToken.len > 0 and rawToken[0] == '\xc4' and rawToken.len > 1:
+          if rawToken[1] == '\xa0':  # Ġ - space
+            tokenStr = if rawToken.len > 2: " " & rawToken[2..^1] else: " "
+          elif rawToken[1] == '\x8a':  # Ċ - newline
+            tokenStr = if rawToken.len > 2: "\\n" & rawToken[2..^1] else: "\\n"
+          elif rawToken[1] == '\x89':  # ĉ - tab
+            tokenStr = if rawToken.len > 2: "\\t" & rawToken[2..^1] else: "\\t"
+          else:
+            tokenStr = rawToken
+        else:
+          tokenStr = rawToken
       echo &"Step {step + 1}: Generated token {nextToken} ({tokenStr})"
     
     echo repeat("-", 50)
