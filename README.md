@@ -22,16 +22,27 @@ sudo ldconfig
 
 ## Downloading test data
 
-Example: Download the TinyStories-1M-ONNX files from [Hugging Face](https://huggingface.co/onnx-community/TinyStories-1M-ONNX/b):
+Example: Download the TinyStories-1M-ONNX files from [Hugging Face](https://huggingface.co/onnx-community/TinyStories-1M-ONNX/):
 
 below are the files you need to download:
 
 ```bash
-tests/testdata
+tests/testdata/TinyStories
 ├── config.json
 ├── merges.txt
 ├── model.onnx
 ├── tokenizer.json
 ├── tokenizer_config.json
 └── vocab.json
+```
+
+Example: Download the Piper voices from [Hugging Face](https://huggingface.co/rhasspy/piper-voices/):
+
+below are the files you need to download:
+
+```bash
+tests/testdata/piper-voices
+├── voices.json
+├── zh_CN-chaowen-medium.onnx
+└── zh_CN-chaowen-medium.onnx.json
 ```

@@ -25,7 +25,7 @@ proc loadTokenizer(path: string) =
   ## Load tokenizer from JSON file
   let jsonContent = readFile(path)
   let tokenizerJson = parseJson(jsonContent)
-  
+
   if tokenizerJson.hasKey("model") and tokenizerJson["model"].hasKey("vocab"):
     let vocab = tokenizerJson["model"]["vocab"]
     for token, id in vocab:
@@ -35,7 +35,7 @@ proc loadTokenizer(path: string) =
       TokenToId[tokenStr] = tokenId
     VocabSize = IdToToken.len
     echo &"Tokenizer loaded: {VocabSize} tokens"
-  
+
   if tokenizerJson.hasKey("added_tokens"):
     for token in tokenizerJson["added_tokens"]:
       let tokenStr = token["content"].getStr()
@@ -44,7 +44,7 @@ proc loadTokenizer(path: string) =
       TokenToId[tokenStr] = tokenId
       if tokenStr == "<|endoftext|>":
         EosTokenId = tokenId
-  
+
   echo &"EOS token ID: {EosTokenId}"
   TokenizerLoaded = true
 
@@ -79,20 +79,20 @@ proc bpeEncode(token: string): seq[string] =
   ## Apply BPE encoding to a token
   if token.len == 0:
     return @[]
-  
+
   var word = newSeq[string](token.len)
   for i in 0 ..< token.len:
     word[i] = $token[i]
-  
+
   if word.len <= 1:
     return word
-  
+
   var pairs = getPairs(word)
-  
+
   while true:
     var minScore = high(int)
     var bigramToMerge: tuple[a: string, b: string] = ("", "")
-    
+
     for merge in BpeMerges:
       for pair in pairs:
         if pair.a == merge.first and pair.b == merge.second:
@@ -100,10 +100,10 @@ proc bpeEncode(token: string): seq[string] =
           if score < minScore:
             minScore = score
             bigramToMerge = pair
-    
+
     if minScore == high(int):
       break
-    
+
     var newWord: seq[string] = @[]
     var i = 0
     while i < word.len:
@@ -113,12 +113,12 @@ proc bpeEncode(token: string): seq[string] =
       else:
         newWord.add(word[i])
         i += 1
-    
+
     word = newWord
     if word.len <= 1:
       break
     pairs = getPairs(word)
-  
+
   return word
 
 proc encodeText(text: string): seq[int64] =
@@ -127,13 +127,13 @@ proc encodeText(text: string): seq[int64] =
   if not TokenizerLoaded:
     # Fallback: return some default tokens
     return @[100'i64, 200, 300]
-  
+
   # Pre-tokenize: split on whitespace and punctuation, but track if preceded by space
   var tokens: seq[tuple[word: string, hasSpacePrefix: bool]] = @[]
   var current = ""
   var wordHasSpacePrefix = false
   var isFirstToken = true
-  
+
   for c in text:
     if c.isAlphaAscii or c.isDigit:
       if current.len == 0:
@@ -159,7 +159,7 @@ proc encodeText(text: string): seq[int64] =
   if current.len > 0:
     let hasPrefix = wordHasSpacePrefix
     tokens.add((current.toLowerAscii(), hasPrefix))
-  
+
   # Apply BPE to each token
   for (token, hasSpacePrefix) in tokens:
     let bpeTokens = bpeEncode(token)
@@ -186,7 +186,7 @@ proc decodeTokens(tokenIds: seq[int64]): string =
   ## Decode token IDs back to text
   if not TokenizerLoaded:
     return "[Tokenizer not loaded]"
-  
+
   var result = ""
   for id in tokenIds:
     if IdToToken.hasKey(id.int):
@@ -220,7 +220,7 @@ proc decodeTokens(tokenIds: seq[int64]): string =
         result.add(token)
     else:
       result.add(&"[{id}]")
-  
+
   return result
 
 proc softmax(logits: seq[float32], temperature: float32 = 1.0): seq[float32] =
@@ -230,12 +230,12 @@ proc softmax(logits: seq[float32], temperature: float32 = 1.0): seq[float32] =
   for l in logits:
     if l > maxLogit:
       maxLogit = l
-  
+
   var sumExp = 0.0'f32
   for i in 0 ..< logits.len:
     result[i] = exp((logits[i] - maxLogit) / temperature)
     sumExp += result[i]
-  
+
   for i in 0 ..< result.len:
     result[i] = result[i] / sumExp
 
@@ -251,7 +251,7 @@ proc sampleToken(logits: seq[float32], temperature: float32 = 1.0): int64 =
   return (probs.len - 1).int64
 
 # Test paths
-const TestDataDir = "tests/testdata"
+const TestDataDir = "tests/testdata/TinyStories"
 const ModelPath = TestDataDir / "model.onnx"
 const TokenizerPath = TestDataDir / "tokenizer.json"
 const MergesPath = TestDataDir / "merges.txt"
@@ -259,11 +259,11 @@ const MergesPath = TestDataDir / "merges.txt"
 suite "KV-Cache Text Generation Tests":
   test "Generate text with KV-cache (single token at a time)":
     echo "\n=== KV-Cache Text Generation Test ==="
-    
+
     if not fileExists(ModelPath):
       echo "Model not found, skipping test"
       skip()
-    
+
     # Load tokenizer and BPE merges
     if fileExists(TokenizerPath):
       loadTokenizer(TokenizerPath)
@@ -271,50 +271,50 @@ suite "KV-Cache Text Generation Tests":
         loadBpeMerges(MergesPath)
     else:
       echo "Tokenizer not found, using simple token IDs"
-    
+
     echo "Loading model..."
     let model = newOnnxModel(ModelPath)
     echo "Model loaded successfully!"
-    
+
     # Model parameters for TinyStories-1M
     let numLayers = 8
     let numHeads = 16
     let hiddenSize = 64
     let headDim = hiddenSize div numHeads  # 4
     let batchSize = 1
-    
+
     # Use a meaningful story prompt
     let promptText = "Once upon a time, a small dragon named Fluffy wanted to explore the world beyond the mountains."
     var inputTokens = encodeText(promptText)
     if inputTokens.len == 0:
       inputTokens = @[100'i64, 200'i64, 300'i64]
-    
+
     echo &"Prompt: '{promptText}'"
     echo &"Encoded {inputTokens.len} tokens"
     if TokenizerLoaded:
       let decoded = decodeTokens(inputTokens)
       echo &"Decoded: '{decoded}'"
-    
+
     # Generation parameters
     let maxNewTokens = 10
     let temperature = 1.0'f32
-    
+
     echo &"\nGenerating {maxNewTokens} new tokens (with KV-cache)..."
     echo repeat("-", 50)
-    
+
     var generatedTokens = inputTokens
     var kvCache: seq[OnnxOutputTensor] = @[]  # Will hold present_key_values from previous step
-    
+
     for step in 0 ..< maxNewTokens:
       let currentSeqLen = if step == 0: inputTokens.len else: 1  # First step uses full prompt, subsequent use single token
       let currentTokens = if step == 0: inputTokens else: @[generatedTokens[^1]]
-      
+
       # Create input tensor
       let inputTensor = OnnxInputTensor(
         data: currentTokens,
         shape: @[batchSize.int64, currentSeqLen.int64]
       )
-      
+
       # Create attention mask
       var attentionMaskData = newSeq[int64](currentSeqLen)
       for i in 0 ..< currentSeqLen:
@@ -323,7 +323,7 @@ suite "KV-Cache Text Generation Tests":
         data: attentionMaskData,
         shape: @[batchSize.int64, currentSeqLen.int64]
       )
-      
+
       # Create position IDs
       var positionIdsData = newSeq[int64](currentSeqLen)
       let startPos = if step == 0: 0 else: generatedTokens.len - 1
@@ -333,7 +333,7 @@ suite "KV-Cache Text Generation Tests":
         data: positionIdsData,
         shape: @[batchSize.int64, currentSeqLen.int64]
       )
-      
+
       # Prepare past_key_values from KV cache
       var pastKeyValues: seq[OnnxInputTensor] = @[]
       if kvCache.len > 0 and kvCache[0].data.len > 0:
@@ -359,30 +359,30 @@ suite "KV-Cache Text Generation Tests":
               data: @[],
               shape: @[batchSize.int64, numHeads.int64, 0'i64, headDim.int64]
             ))
-      
+
       # Run inference with KV-cache
       let output = runInferenceNeoWithCache(model, inputTensor, attentionMask, positionIds, pastKeyValues, numLayers)
-      
+
       # Update KV cache with present_key_values for next iteration
       kvCache = output.presentKeyValues
-      
+
       # Get logits for the last position
       let vocabSizeInt = output.logits.shape[2].int
       let lastPosStart = (currentSeqLen - 1) * vocabSizeInt
       var lastLogits = newSeq[float32](vocabSizeInt)
       for i in 0 ..< vocabSizeInt:
         lastLogits[i] = output.logits.data[lastPosStart + i]
-      
+
       # Sample next token
       let nextToken = sampleToken(lastLogits, temperature)
-      
+
       # Check for end of text
       if nextToken == EosTokenId.int64:
         echo "<|endoftext|>"
         break
-      
+
       generatedTokens.add(nextToken)
-      
+
       # Show the token
       var tokenStr = &"[{nextToken}]"
       if IdToToken.hasKey(nextToken.int):
@@ -400,23 +400,23 @@ suite "KV-Cache Text Generation Tests":
         else:
           tokenStr = rawToken
       echo &"Step {step + 1}: Generated token {nextToken} ({tokenStr})"
-    
+
     echo repeat("-", 50)
     echo &"\nTotal tokens generated: {generatedTokens.len - inputTokens.len}"
     echo &"Full token sequence length: {generatedTokens.len}"
-    
+
     # Try to decode
     if TokenizerLoaded:
       let fullText = decodeTokens(generatedTokens)
       echo &"Full text: '{fullText}'"
-      
+
       let generatedText = decodeTokens(generatedTokens[inputTokens.len .. ^1])
       echo &"Generated text: '{generatedText}'"
-    
+
     echo "=== Generation complete ===\n"
-    
+
     # Cleanup
     model.close()
-    
+
     # Verify we generated some tokens
     check generatedTokens.len > inputTokens.len
