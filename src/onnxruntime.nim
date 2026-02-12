@@ -23,5 +23,5 @@
 ##   echo output.shape  # [1, 4, vocab_size]
 ##   echo output.data   # Raw logits
 
-import onnx/onnxmodel
+import onnxruntime/onnxmodel
 export onnxmodel
