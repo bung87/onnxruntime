@@ -11,7 +11,7 @@ import random
 import os
 import strformat
 
-import onnx/onnxmodel
+import onnxruntime
 
 # Tokenizer globals
 var TokenizerLoaded = false
