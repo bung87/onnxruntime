@@ -22,7 +22,7 @@ sudo ldconfig
 
 ## Downloading test data
 
-Example: Download the TinyStories-1M-ONNX files from [Hugging Face](https://huggingface.co/onnx-community/TinyStories-1M-ONNX/):
+Text generation Example: Download the TinyStories-1M-ONNX files from [Hugging Face](https://huggingface.co/onnx-community/TinyStories-1M-ONNX/):
 
 below are the files you need to download:
 
@@ -36,7 +36,7 @@ tests/testdata/TinyStories
 └── vocab.json
 ```
 
-Example: Download the Piper voices from [Hugging Face](https://huggingface.co/rhasspy/piper-voices/):
+TTS Example: Download the Piper voices from [Hugging Face](https://huggingface.co/rhasspy/piper-voices/):
 
 below are the files you need to download:
 
@@ -47,7 +47,7 @@ tests/testdata/piper-voices
 └── zh_CN-chaowen-medium.onnx.json
 ```
 
-(not work) Example: Download the Whisper ASR model from [Hugging Face](https://huggingface.co/onnx-community/whisper-large-v3-chinese-ONNX/):
+ASR Example (not work): Download the Whisper ASR model from [Hugging Face](https://huggingface.co/onnx-community/whisper-large-v3-chinese-ONNX/):
 
 below are the files you need to download:
 
