@@ -46,3 +46,18 @@ tests/testdata/piper-voices
 ├── zh_CN-chaowen-medium.onnx
 └── zh_CN-chaowen-medium.onnx.json
 ```
+
+(not work) Example: Download the Whisper ASR model from [Hugging Face](https://huggingface.co/onnx-community/whisper-large-v3-chinese-ONNX/):
+
+below are the files you need to download:
+
+```bash
+tests/testdata/whisper-large-v3-zh
+├── config.json
+├── generation_config.json
+├── special_tokens_map.json
+├── tokenizer.json
+├── vocab.json
+├── encoder_model.onnx
+└── decoder_model.onnx
+```

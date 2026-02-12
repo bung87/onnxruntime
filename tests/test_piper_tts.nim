@@ -88,12 +88,15 @@ proc loadConfig(path: string): PiperConfig =
 # "你好我是中国人" - ni3 hao3 wo3 shi4 zhong1 guo2 ren2
 const TestPhonemes = @[
   "^",                                      # Start token
-  "n", "i", "3", "h", "a", "o", "3", " ",   # "ni hao" (hello)
-  "w", "o", "3", " ",                       # "wo" (I)
-  "sh", "i", "4", " ",                      # "shi" (am/is)
-  "zh", "o", "n", "g", "1", " ",           # "zhong" (Chinese)
-  "g", "u", "o", "2", " ",                 # "guo" (country)
-  "r", "e", "n", "2",                       # "ren" (person)
+  "q", "i", "a", "n", "1", "w", "a", "n", "4", " ",   # "qian wan" (千万)
+  "b", "u", "2", " ",                       # "bu" (不)
+  "y", "a", "o", "4", " ",                  # "yao" (要)
+  "w", "a", "n", "g", "4", " ",             # "wang" (忘)
+  "j", "i", "4", " ",                       # "ji" (记)
+  "j", "i", "e", "1", " ",                  # "jie" (阶)
+  "j", "i", "3", " ",                       # "ji" (级)
+  "d", "o", "u", "4", " ",                  # "dou" (斗)
+  "zh", "e", "n", "g", "1",                 # "zheng" (争)
   "$"                                       # End token
 ]
 
