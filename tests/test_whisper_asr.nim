@@ -562,7 +562,7 @@ suite "Whisper ASR Tests":
         if val != 0.0:
           encNonZero += 1
       
-      ReleaseTensorTypeAndShapeInfo(encTypeInfo)
+      # ReleaseTensorTypeAndShapeInfo(encTypeInfo)
 
       # Step 3: Run decoder with greedy decoding
       let decoder = newOnnxModel(DecoderPath)
@@ -657,8 +657,8 @@ suite "Whisper ASR Tests":
           nextToken = greedyDecode(lastPosLogits, vocabSize)
           skipSuppressed = false
         
-        ReleaseValue(logitsValue)
-        ReleaseValue(inputIdsValue)
+        # ReleaseValue(logitsValue)
+        # ReleaseValue(inputIdsValue)
 
         # Check for end of sequence
         if nextToken == END_OF_TEXT.int64:
@@ -687,10 +687,7 @@ suite "Whisper ASR Tests":
       echo &"Transcription: '{resultText}'"
       echo "==================="
 
-      # Cleanup
-      ReleaseValue(encoderOutput)
-      ReleaseValue(encoderInput)
-      ReleaseMemoryInfo(memoryInfo)
+
       encoder.close()
       decoder.close()
 

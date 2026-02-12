@@ -464,3 +464,48 @@ proc checkStatus*(status: OrtStatusPtr) =
     let msg = $GetErrorMessage(status)
     ReleaseStatus(status)
     raise newException(Exception, msg)
+
+# Automatic resource management with destroy hooks
+proc `=destroy`*(info: OrtMemoryInfoObj) =
+  ## Automatically release memory info when it goes out of scope
+  let ptrInfo = cast[OrtMemoryInfo](addr info)
+  if ptrInfo != nil:
+    ort_ReleaseMemoryInfo(ptrInfo)
+
+proc `=destroy`*(value: OrtValueObj) =
+  ## Automatically release tensor value when it goes out of scope
+  let ptrValue = cast[OrtValue](addr value)
+  if ptrValue != nil:
+    ort_ReleaseValue(ptrValue)
+
+proc `=destroy`*(session: OrtSessionObj) =
+  ## Automatically release session when it goes out of scope
+  let ptrSession = cast[OrtSession](addr session)
+  if ptrSession != nil:
+    ort_ReleaseSession(ptrSession)
+
+proc `=destroy`*(typeInfo: OrtTypeInfoObj) =
+  ## Automatically release type info when it goes out of scope
+  let ptrTypeInfo = cast[OrtTypeInfo](addr typeInfo)
+  if ptrTypeInfo != nil:
+    ort_ReleaseTypeInfo(ptrTypeInfo)
+
+proc `=destroy`*(tensorInfo: OrtTensorTypeAndShapeInfoObj) =
+  ## Automatically release tensor shape info when it goes out of scope
+  let ptrTensorInfo = cast[OrtTensorTypeAndShapeInfo](addr tensorInfo)
+  if ptrTensorInfo != nil:
+    ort_ReleaseTensorTypeAndShapeInfo(ptrTensorInfo)
+
+proc `=destroy`*(options: OrtSessionOptionsObj) =
+  ## Automatically release session options when it goes out of scope
+  let ptrOptions = cast[OrtSessionOptions](addr options)
+  if ptrOptions != nil:
+    ort_ReleaseSessionOptions(ptrOptions)
+
+proc `=destroy`*(allocator: OrtAllocatorObj) =
+  ## Automatically release allocator when it goes out of scope
+  let ptrAllocator = cast[OrtAllocator](addr allocator)
+  if ptrAllocator != nil:
+    ort_ReleaseAllocator(ptrAllocator)
+
+

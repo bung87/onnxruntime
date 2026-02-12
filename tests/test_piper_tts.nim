@@ -290,21 +290,6 @@ proc runPiperInference(
     shape: outputShape
   )
 
-  # Cleanup in reverse order of creation
-  # Note: Don't release typeInfo or tensorInfo - they are owned by outputOrtValue
-  # and releasing them causes double-free issues
-  if outputOrtValue != nil:
-    ReleaseValue(outputOrtValue)
-  if sidOrtValue != nil:
-    ReleaseValue(sidOrtValue)
-  if scalesOrtValue != nil:
-    ReleaseValue(scalesOrtValue)
-  if lengthOrtValue != nil:
-    ReleaseValue(lengthOrtValue)
-  if inputOrtValue != nil:
-    ReleaseValue(inputOrtValue)
-  if memoryInfo != nil:
-    ReleaseMemoryInfo(memoryInfo)
 
 suite "Piper TTS Tests":
   test "Load Piper model configuration":
