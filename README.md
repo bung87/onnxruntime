@@ -52,7 +52,7 @@ ASR Example (not work): Download the Whisper ASR model from [Hugging Face](https
 below are the files you need to download:
 
 ```bash
-tests/testdata/whisper-large-v3-zh
+tests/testdata/onnx-community/whisper-large-v3-chinese-ONNX
 ├── config.json
 ├── generation_config.json
 ├── special_tokens_map.json

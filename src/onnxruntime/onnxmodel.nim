@@ -4,10 +4,14 @@
 ## with tokenized inputs (e.g., for tiny2GPT or GPT-2 models)
 
 import ort_bindings
-import strformat
 
 # Re-export types needed by users of this module
-export OrtLoggingLevel, ONNXTensorElementDataType
+export OrtLoggingLevel, ONNXTensorElementDataType, OrtErrorCode
+
+## Custom exception for ONNX Runtime errors
+type OnnxRuntimeError* = object of CatchableError
+  ## Exception raised when ONNX Runtime operations fail
+  errorCode*: OrtErrorCode  ## The specific error code from ONNX Runtime
 
 ## Type representing a tensor input for the model
 type
@@ -659,8 +663,43 @@ proc runInferenceNeoComplete*(
     shape: outputShape
   )
 
-## Full inference with KV-cache support
-## This version properly captures present_key_values and can reuse them
+## Model introspection utilities
+
+proc getModelOutputNames*(model: OnnxModel): seq[string] =
+  ## Discover the output names from the model
+  ## This helps determine the correct names for present_key_values outputs
+  result = @[]
+  var status: OrtStatusPtr
+  
+  # Get output count first (doesn't need allocator)
+  var outputCount: csize_t
+  status = SessionGetOutputCount(model.session, outputCount.addr)
+  if status != nil:
+    ReleaseStatus(status)
+    return result
+  
+  # Get default allocator
+  var allocator: OrtAllocator
+  status = GetAllocatorWithDefaultOptions(allocator.addr)
+  if status != nil:
+    ReleaseStatus(status)
+    return result
+  
+  # Get each output name
+  for i in 0 ..< outputCount.int:
+    var name: cstring
+    status = SessionGetOutputName(model.session, i.csize_t, allocator, name.addr)
+    if status == nil:
+      result.add($name)
+    else:
+      ReleaseStatus(status)
+  
+  # Release allocator after use
+  ReleaseAllocator(allocator)
+
+## Full inference with KV-cache input support
+## Note: present_key_values output is not captured due to ONNX Runtime limitations
+## Callers should pass the full sequence each iteration instead of relying on KV-cache
 
 proc runInferenceNeoWithCache*(
   model: OnnxModel,
@@ -670,8 +709,9 @@ proc runInferenceNeoWithCache*(
   pastKeyValues: seq[OnnxInputTensor],
   numLayers: int = 8
 ): OnnxNeoOutput =
-  ## Run inference on GPT-Neo model with full KV-cache support
-  ## Captures both logits and present_key_values for efficient generation
+  ## Run inference on GPT-Neo model
+  ## Accepts past_key_values as input but does not return present_key_values
+  ## For proper generation, pass the full token sequence on each call
   
   var status: OrtStatusPtr
   

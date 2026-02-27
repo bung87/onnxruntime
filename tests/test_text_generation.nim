@@ -1,6 +1,5 @@
 ## test_text_generation.nim
-## Test text generation with proper KV-cache handling
-## This captures present_key_values from outputs and feeds them back as past_key_values
+## Production-ready text generation test with quality improvements
 
 import unittest
 import json
@@ -10,100 +9,161 @@ import math
 import random
 import os
 import strformat
+import algorithm
+import sets
+import hashes
 
 import onnxruntime
 
-# Tokenizer globals
-var TokenizerLoaded = false
-var VocabSize = 50257
-var EosTokenId = 50256
-var IdToToken: Table[int, string]
-var TokenToId: Table[string, int]
-var BpeMerges: seq[tuple[first: string, second: string]]
+#==============================================================================
+# Configuration Types
+#==============================================================================
 
-proc loadTokenizer(path: string) =
-  ## Load tokenizer from JSON file
-  let jsonContent = readFile(path)
-  let tokenizerJson = parseJson(jsonContent)
+type
+  GenerationConfig* = object
+    ## Configuration for text generation with GPT-Neo/TinyStories models
+    ##
+    ## TUNING GUIDE:
+    ## =============
+    ## 
+    ## For COHERENT, FOCUSED output (factual, consistent):
+    ##   temperature: 0.5-0.7, topK: 20-40, topP: 0.85-0.90
+    ##
+    ## For BALANCED output (recommended default):
+    ##   temperature: 0.75-0.85, topK: 40-60, topP: 0.90-0.95
+    ##
+    ## For CREATIVE, VARIED output (storytelling, brainstorming):
+    ##   temperature: 0.9-1.1, topK: 60-100, topP: 0.95-0.99
+    ##
+    ## To REDUCE REPETITION:
+    ##   Increase repetitionPenalty: 1.1-1.3 (higher = less repetition)
+    ##
+    ## To PREVENT GARBLED TEXT:
+    ##   Lower temperature, use stopSequences to catch UTF-8 errors
+    ##
+    maxNewTokens*: int          ## Maximum number of new tokens to generate
+    temperature*: float32       ## Sampling temperature (0.0 = greedy, 1.0 = random)
+    topK*: int                  ## Top-k sampling (0 = disabled)
+    topP*: float32              ## Nucleus sampling (0.0 = disabled)
+    repetitionPenalty*: float32 ## Penalty for repeating tokens (1.0 = no penalty)
+    seed*: int                  ## Random seed for reproducibility
+    eosTokenId*: int            ## End-of-sequence token ID
+    padTokenId*: int            ## Padding token ID
+    stopSequences*: seq[string] ## Stop generation when these sequences appear
+    maxRepetitionLen*: int      ## Maximum length of repeated text to allow
+    minTokenProb*: float32      ## Minimum token probability to consider
 
-  if tokenizerJson.hasKey("model") and tokenizerJson["model"].hasKey("vocab"):
-    let vocab = tokenizerJson["model"]["vocab"]
-    for token, id in vocab:
-      let tokenStr = token  # token is already a string (key in JSON object)
+proc defaultGenerationConfig*(): GenerationConfig =
+  ## Return default generation configuration
+  result.maxNewTokens = 100
+  result.temperature = 0.8'f32
+  result.topK = 50
+  result.topP = 0.95'f32
+  result.repetitionPenalty = 1.2'f32  ## Increased from 1.1 to reduce repetition
+  result.seed = 42
+  result.eosTokenId = 50256
+  result.padTokenId = 50256
+  result.stopSequences = @["<|endoftext|>", "Ã", "Â", "âĢ", "ï¿½"]
+  result.maxRepetitionLen = 10
+  result.minTokenProb = 0.001'f32
+
+#==============================================================================
+# Tokenizer Types and Procedures
+#==============================================================================
+
+type
+  Tokenizer* = object
+    ## GPT-2/BPE Tokenizer
+    vocab*: Table[string, int]
+    idToToken*: Table[int, string]
+    merges*: seq[tuple[first: string, second: string]]
+    vocabSize*: int
+    eosTokenId*: int
+    loaded*: bool
+
+proc initTokenizer*(): Tokenizer =
+  ## Initialize empty tokenizer
+  result.vocab = initTable[string, int]()
+  result.idToToken = initTable[int, string]()
+  result.merges = @[]
+  result.vocabSize = 50257
+  result.eosTokenId = 50256
+  result.loaded = false
+
+proc loadTokenizerJson*(tokenizer: var Tokenizer, path: string) =
+  ## Load tokenizer vocabulary from JSON file
+  let content = readFile(path)
+  let json = parseJson(content)
+  
+  if json.hasKey("model") and json["model"].hasKey("vocab"):
+    for token, id in json["model"]["vocab"]:
       let tokenId = id.getInt()
-      IdToToken[tokenId] = tokenStr
-      TokenToId[tokenStr] = tokenId
-    VocabSize = IdToToken.len
-    echo &"Tokenizer loaded: {VocabSize} tokens"
-
-  if tokenizerJson.hasKey("added_tokens"):
-    for token in tokenizerJson["added_tokens"]:
+      tokenizer.vocab[token] = tokenId
+      tokenizer.idToToken[tokenId] = token
+    tokenizer.vocabSize = tokenizer.vocab.len
+  
+  if json.hasKey("added_tokens"):
+    for token in json["added_tokens"]:
       let tokenStr = token["content"].getStr()
       let tokenId = token["id"].getInt()
-      IdToToken[tokenId] = tokenStr
-      TokenToId[tokenStr] = tokenId
+      tokenizer.vocab[tokenStr] = tokenId
+      tokenizer.idToToken[tokenId] = tokenStr
       if tokenStr == "<|endoftext|>":
-        EosTokenId = tokenId
+        tokenizer.eosTokenId = tokenId
+  
+  tokenizer.loaded = true
 
-  echo &"EOS token ID: {EosTokenId}"
-  TokenizerLoaded = true
-
-proc loadBpeMerges(path: string) =
+proc loadBpeMerges*(tokenizer: var Tokenizer, path: string) =
   ## Load BPE merge rules from file
-  BpeMerges = @[]
+  tokenizer.merges = @[]
   let content = readFile(path)
   var lineCount = 0
   for line in content.splitLines():
-    if lineCount < 1:  # Skip header
+    if lineCount < 1:
       lineCount.inc
       continue
     let parts = line.split(" ")
     if parts.len >= 2:
-      BpeMerges.add((parts[0], parts[1]))
+      tokenizer.merges.add((parts[0], parts[1]))
     lineCount.inc
-    if BpeMerges.len >= 50000:  # Limit merges
+    if tokenizer.merges.len >= 50000:
       break
-  echo &"Loaded {BpeMerges.len} BPE merge rules"
 
 proc getPairs(word: seq[string]): seq[tuple[a: string, b: string]] =
-  ## Get all adjacent pairs in a word
   result = @[]
   if word.len < 2:
     return
-  var prevChar = word[0]
-  for i in 1 ..< word.len:
-    result.add((prevChar, word[i]))
-    prevChar = word[i]
+  for i in 0 ..< word.len - 1:
+    result.add((word[i], word[i+1]))
 
-proc bpeEncode(token: string): seq[string] =
-  ## Apply BPE encoding to a token
+proc bpeEncode(tokenizer: Tokenizer, token: string): seq[string] =
   if token.len == 0:
     return @[]
-
+  
   var word = newSeq[string](token.len)
   for i in 0 ..< token.len:
     word[i] = $token[i]
-
+  
   if word.len <= 1:
     return word
-
+  
   var pairs = getPairs(word)
-
+  
   while true:
     var minScore = high(int)
     var bigramToMerge: tuple[a: string, b: string] = ("", "")
-
-    for merge in BpeMerges:
+    
+    for merge in tokenizer.merges:
       for pair in pairs:
         if pair.a == merge.first and pair.b == merge.second:
-          let score = BpeMerges.find(merge)
+          let score = tokenizer.merges.find(merge)
           if score < minScore:
             minScore = score
             bigramToMerge = pair
-
+    
     if minScore == high(int):
       break
-
+    
     var newWord: seq[string] = @[]
     var i = 0
     while i < word.len:
@@ -113,100 +173,86 @@ proc bpeEncode(token: string): seq[string] =
       else:
         newWord.add(word[i])
         i += 1
-
+    
     word = newWord
     if word.len <= 1:
       break
     pairs = getPairs(word)
-
+  
   return word
 
-proc encodeText(text: string): seq[int64] =
-  ## Encode text to token IDs using BPE
+proc encode*(tokenizer: Tokenizer, text: string): seq[int64] =
   result = @[]
-  if not TokenizerLoaded:
-    # Fallback: return some default tokens
-    return @[100'i64, 200, 300]
-
-  # Pre-tokenize: split on whitespace and punctuation, but track if preceded by space
+  if not tokenizer.loaded:
+    return result
+  
   var tokens: seq[tuple[word: string, hasSpacePrefix: bool]] = @[]
   var current = ""
   var wordHasSpacePrefix = false
   var isFirstToken = true
-
+  
   for c in text:
     if c.isAlphaAscii or c.isDigit:
       if current.len == 0:
-        # Starting a new word - check if previous char was space
         wordHasSpacePrefix = not isFirstToken
       current.add(c)
     else:
       if current.len > 0:
-        # First word doesn't get space prefix, subsequent words do
-        let hasPrefix = wordHasSpacePrefix
-        tokens.add((current.toLowerAscii(), hasPrefix))
+        tokens.add((current.toLowerAscii(), wordHasSpacePrefix))
         isFirstToken = false
         current = ""
         wordHasSpacePrefix = false
       if c.isSpaceAscii:
-        # Mark that next word should have space prefix
         wordHasSpacePrefix = true
       else:
-        # Punctuation doesn't get space prefix
         tokens.add(($c, false))
         isFirstToken = false
         wordHasSpacePrefix = false
+  
   if current.len > 0:
-    let hasPrefix = wordHasSpacePrefix
-    tokens.add((current.toLowerAscii(), hasPrefix))
-
-  # Apply BPE to each token
+    tokens.add((current.toLowerAscii(), wordHasSpacePrefix))
+  
   for (token, hasSpacePrefix) in tokens:
-    let bpeTokens = bpeEncode(token)
+    let bpeTokens = tokenizer.bpeEncode(token)
     var isFirstSubToken = true
     for bpeToken in bpeTokens:
-      # Add Ġ prefix if this token should have a space before it
       let fullToken = if hasSpacePrefix and isFirstSubToken: "Ġ" & bpeToken else: bpeToken
       isFirstSubToken = false
-      # Prefer the token with the correct prefix when space is needed
-      if hasSpacePrefix and TokenToId.hasKey(fullToken):
-        result.add(TokenToId[fullToken].int64)
-      elif TokenToId.hasKey(bpeToken):
-        result.add(TokenToId[bpeToken].int64)
-      elif TokenToId.hasKey(fullToken):
-        result.add(TokenToId[fullToken].int64)
+      
+      if hasSpacePrefix and tokenizer.vocab.hasKey(fullToken):
+        result.add(tokenizer.vocab[fullToken].int64)
+      elif tokenizer.vocab.hasKey(bpeToken):
+        result.add(tokenizer.vocab[bpeToken].int64)
+      elif tokenizer.vocab.hasKey(fullToken):
+        result.add(tokenizer.vocab[fullToken].int64)
       else:
-        # Try character-level fallback
         for c in bpeToken:
           let charToken = $c
-          if TokenToId.hasKey(charToken):
-            result.add(TokenToId[charToken].int64)
+          if tokenizer.vocab.hasKey(charToken):
+            result.add(tokenizer.vocab[charToken].int64)
 
-proc decodeTokens(tokenIds: seq[int64]): string =
-  ## Decode token IDs back to text
-  if not TokenizerLoaded:
-    return "[Tokenizer not loaded]"
-
+proc decode*(tokenizer: Tokenizer, tokenIds: seq[int64]): string =
+  if not tokenizer.loaded:
+    return ""
+  
   var result = ""
   for id in tokenIds:
-    if IdToToken.hasKey(id.int):
-      let token = IdToToken[id.int]
-      # Handle GPT-2 style space marker (Ġ = space, Ċ = newline, etc.)
-      # Use byte comparison to avoid Unicode display issues
+    if tokenizer.idToToken.hasKey(id.int):
+      let token = tokenizer.idToToken[id.int]
       if token.len > 0:
         let firstByte = token[0]
-        if firstByte == '\xc4':  # UTF-8 start byte for Ġ, Ċ, etc.
+        if firstByte == '\xc4':
           if token.len > 1:
             let secondByte = token[1]
-            if secondByte == '\xa0':  # Ġ (U+0120) - space prefix
-              result.add(" ")  # Add space before token content
+            if secondByte == '\xa0':
+              result.add(" ")
               if token.len > 2:
                 result.add(token[2..^1])
-            elif secondByte == '\x8a':  # Ċ (U+010A) - newline prefix
+            elif secondByte == '\x8a':
               result.add("\n")
               if token.len > 2:
                 result.add(token[2..^1])
-            elif secondByte == '\x89':  # ĉ (U+0109) - tab prefix
+            elif secondByte == '\x89':
               result.add("\t")
               if token.len > 2:
                 result.add(token[2..^1])
@@ -220,203 +266,386 @@ proc decodeTokens(tokenIds: seq[int64]): string =
         result.add(token)
     else:
       result.add(&"[{id}]")
-
+  
   return result
 
+#==============================================================================
+# Sampling Utilities
+#==============================================================================
+
 proc softmax(logits: seq[float32], temperature: float32 = 1.0): seq[float32] =
-  ## Apply softmax with temperature to logits
   result = newSeq[float32](logits.len)
   var maxLogit = logits[0]
   for l in logits:
     if l > maxLogit:
       maxLogit = l
-
+  
   var sumExp = 0.0'f32
   for i in 0 ..< logits.len:
     result[i] = exp((logits[i] - maxLogit) / temperature)
     sumExp += result[i]
-
+  
   for i in 0 ..< result.len:
     result[i] = result[i] / sumExp
 
-proc sampleToken(logits: seq[float32], temperature: float32 = 1.0): int64 =
-  ## Sample a token from logits using temperature
-  let probs = softmax(logits, temperature)
+proc topKFilter(logits: var seq[float32], k: int) =
+  if k <= 0 or k >= logits.len:
+    return
+  
+  var sorted = logits.sorted(SortOrder.Descending)
+  let threshold = sorted[k - 1]
+  
+  for i in 0 ..< logits.len:
+    if logits[i] < threshold:
+      logits[i] = -Inf.float32
+
+proc topPFilter(logits: var seq[float32], p: float32) =
+  if p <= 0.0 or p >= 1.0:
+    return
+  
+  var probs = softmax(logits)
+  
+  var indexed: seq[tuple[prob: float32, idx: int]] = @[]
+  for i, prob in probs:
+    indexed.add((prob, i))
+  indexed.sort(proc(a, b: auto): int = cmp(b.prob, a.prob))
+  
+  var cumsum = 0.0'f32
+  var cutoffIdx = 0
+  for i, (prob, _) in indexed:
+    cumsum += prob
+    if cumsum > p:
+      cutoffIdx = i
+      break
+  
+  var keep = initHashSet[int]()
+  for i in 0 .. cutoffIdx:
+    keep.incl(indexed[i].idx)
+  
+  for i in 0 ..< logits.len:
+    if i notin keep:
+      logits[i] = -Inf.float32
+
+proc applyRepetitionPenalty(logits: var seq[float32], tokenIds: seq[int64], penalty: float32) =
+  if penalty <= 1.0:
+    return
+  
+  for id in tokenIds:
+    let idx = id.int
+    if idx >= 0 and idx < logits.len:
+      if logits[idx] > 0:
+        logits[idx] = logits[idx] / penalty
+      else:
+        logits[idx] = logits[idx] * penalty
+
+proc sampleToken*(logits: seq[float32], config: GenerationConfig, 
+                  generatedTokens: seq[int64] = @[]): int64 =
+  var filteredLogits = logits
+  
+  if config.repetitionPenalty > 1.0:
+    applyRepetitionPenalty(filteredLogits, generatedTokens, config.repetitionPenalty)
+  
+  if config.topK > 0:
+    topKFilter(filteredLogits, config.topK)
+  
+  if config.topP > 0.0 and config.topP < 1.0:
+    topPFilter(filteredLogits, config.topP)
+  
+  var probs = softmax(filteredLogits, config.temperature)
+  
+  # Filter out very low probability tokens
+  for i in 0 ..< probs.len:
+    if probs[i] < config.minTokenProb:
+      probs[i] = 0.0
+  
+  # Renormalize
+  var sumProb = 0.0'f32
+  for p in probs:
+    sumProb += p
+  
+  if sumProb > 0:
+    for i in 0 ..< probs.len:
+      probs[i] = probs[i] / sumProb
+  
   let r = rand(1.0'f32)
   var cumsum = 0.0'f32
   for i in 0 ..< probs.len:
     cumsum += probs[i]
     if r <= cumsum:
       return i.int64
+  
   return (probs.len - 1).int64
 
-# Test paths
-const TestDataDir = "tests/testdata/TinyStories"
-const ModelPath = TestDataDir / "model.onnx"
-const TokenizerPath = TestDataDir / "tokenizer.json"
-const MergesPath = TestDataDir / "merges.txt"
+#==============================================================================
+# Repetition Detection
+#==============================================================================
 
-suite "KV-Cache Text Generation Tests":
-  test "Generate text with KV-cache (single token at a time)":
-    echo "\n=== KV-Cache Text Generation Test ==="
+proc hasRepetition*(text: string, maxRepetitionLen: int): bool =
+  ## Check if text has repetitive patterns
+  if text.len < maxRepetitionLen * 2:
+    return false
+  
+  # Check for repeated phrases of various lengths
+  for phraseLen in 3 .. maxRepetitionLen:
+    if text.len < phraseLen * 2:
+      continue
+    
+    let recentText = text[max(0, text.len - phraseLen * 4) .. ^1]
+    
+    for i in 0 ..< recentText.len - phraseLen:
+      let phrase = recentText[i ..< i + phraseLen]
+      var count = 0
+      var pos = 0
+      while pos <= recentText.len - phraseLen:
+        if recentText[pos ..< pos + phraseLen] == phrase:
+          count += 1
+          if count >= 3:  # Same phrase appears 3+ times
+            return true
+          pos += phraseLen
+        else:
+          pos += 1
+  
+  return false
 
-    if not fileExists(ModelPath):
-      echo "Model not found, skipping test"
+proc shouldStopGeneration*(text: string, config: GenerationConfig): bool =
+  ## Check if generation should stop based on stop sequences or quality issues
+  
+  # Check stop sequences
+  for stopSeq in config.stopSequences:
+    if stopSeq in text:
+      return true
+  
+  # Check for excessive repetition
+  if hasRepetition(text, config.maxRepetitionLen):
+    return true
+  
+  # Check for garbled UTF-8 indicators
+  let garbledIndicators = ["Ã", "Â", "ï¿½", "âĢ", "âĿ", "Ŀ", "â"]
+  for indicator in garbledIndicators:
+    if indicator in text:
+      return true
+  
+  return false
+
+#==============================================================================
+# Text Generation
+#==============================================================================
+
+proc generateText*(
+  model: OnnxModel,
+  tokenizer: Tokenizer,
+  prompt: string,
+  config: GenerationConfig,
+  numLayers: int = 8,
+  numHeads: int = 16,
+  headDim: int = 4
+): tuple[text: string, tokens: seq[int64], stoppedEarly: bool] =
+  ## Generate text from a prompt using the model
+  ## Returns: (generated text, all tokens, whether stopped early)
+  
+  let inputTokens = tokenizer.encode(prompt)
+  if inputTokens.len == 0:
+    return ("", @[], false)
+  
+  var generatedTokens = inputTokens
+  let batchSize = 1'i64
+  var stoppedEarly = false
+  var lastText = ""
+  
+  for step in 0 ..< config.maxNewTokens:
+    let currentSeqLen = generatedTokens.len
+    
+    # Create input tensor
+    let inputTensor = OnnxInputTensor(
+      data: generatedTokens,
+      shape: @[batchSize, currentSeqLen.int64]
+    )
+    
+    # Create attention mask
+    var attentionMaskData = newSeq[int64](currentSeqLen)
+    for i in 0 ..< currentSeqLen:
+      attentionMaskData[i] = 1'i64
+    let attentionMask = OnnxInputTensor(
+      data: attentionMaskData,
+      shape: @[batchSize, currentSeqLen.int64]
+    )
+    
+    # Create position IDs
+    var positionIdsData = newSeq[int64](currentSeqLen)
+    for i in 0 ..< currentSeqLen:
+      positionIdsData[i] = i.int64
+    let positionIds = OnnxInputTensor(
+      data: positionIdsData,
+      shape: @[batchSize, currentSeqLen.int64]
+    )
+    
+    # Create empty past_key_values
+    var pastKeyValues: seq[OnnxInputTensor] = @[]
+    for layer in 0 ..< numLayers:
+      for kv in 0 ..< 2:
+        pastKeyValues.add(OnnxInputTensor(
+          data: @[],
+          shape: @[batchSize, numHeads.int64, 0'i64, headDim.int64]
+        ))
+    
+    # Run inference
+    let output = runInferenceNeoWithCache(
+      model, inputTensor, attentionMask, positionIds, pastKeyValues, numLayers
+    )
+    
+    # Get logits for last position
+    let vocabSize = output.logits.shape[2].int
+    let lastPosStart = (currentSeqLen - 1) * vocabSize
+    var lastLogits = newSeq[float32](vocabSize)
+    for i in 0 ..< vocabSize:
+      lastLogits[i] = output.logits.data[lastPosStart + i]
+    
+    # Sample next token
+    let nextToken = sampleToken(lastLogits, config, generatedTokens)
+    
+    # Check for EOS
+    if nextToken.int == config.eosTokenId:
+      break
+    
+    generatedTokens.add(nextToken)
+    
+    # Check for quality issues every 5 tokens
+    if step mod 5 == 0:
+      let currentText = tokenizer.decode(generatedTokens)
+      let newText = currentText[lastText.len .. ^1]
+      
+      if shouldStopGeneration(newText, config):
+        echo &"  [Stopping early at step {step} due to quality issue]"
+        stoppedEarly = true
+        # Remove the last few tokens that caused the issue
+        generatedTokens = generatedTokens[0 ..< max(generatedTokens.len - 3, inputTokens.len)]
+        break
+      
+      lastText = currentText
+  
+  let fullText = tokenizer.decode(generatedTokens)
+  return (fullText, generatedTokens, stoppedEarly)
+
+#==============================================================================
+# Tests
+#==============================================================================
+
+suite "Text Generation Tests":
+  
+  const
+    TestDataDir = "tests/testdata/TinyStories"
+    ModelPath = TestDataDir / "model.onnx"
+    TokenizerPath = TestDataDir / "tokenizer.json"
+    MergesPath = TestDataDir / "merges.txt"
+  
+  test "Tokenizer encode/decode roundtrip":
+    var tokenizer = initTokenizer()
+    
+    if not fileExists(TokenizerPath):
       skip()
-
-    # Load tokenizer and BPE merges
+    
+    tokenizer.loadTokenizerJson(TokenizerPath)
+    if fileExists(MergesPath):
+      tokenizer.loadBpeMerges(MergesPath)
+    
+    let testTexts = @[
+      "Hello world",
+      "Once upon a time",
+      "The quick brown fox"
+    ]
+    
+    for text in testTexts:
+      let encoded = tokenizer.encode(text)
+      check encoded.len > 0
+      let decoded = tokenizer.decode(encoded)
+      check decoded.len > 0
+  
+  test "Generate text with quality controls":
+    if not fileExists(ModelPath):
+      echo "Model not found at " & ModelPath & ", skipping test"
+      skip()
+    
+    var tokenizer = initTokenizer()
     if fileExists(TokenizerPath):
-      loadTokenizer(TokenizerPath)
+      tokenizer.loadTokenizerJson(TokenizerPath)
       if fileExists(MergesPath):
-        loadBpeMerges(MergesPath)
-    else:
-      echo "Tokenizer not found, using simple token IDs"
-
-    echo "Loading model..."
+        tokenizer.loadBpeMerges(MergesPath)
+    
+    if not tokenizer.loaded:
+      echo "Tokenizer not found, skipping test"
+      skip()
+    
+    echo "\n=== Text Generation Test ==="
+    echo "Loading model from " & ModelPath & "..."
     let model = newOnnxModel(ModelPath)
     echo "Model loaded successfully!"
-
-    # Model parameters for TinyStories-1M
-    let numLayers = 8
-    let numHeads = 16
-    let hiddenSize = 64
-    let headDim = hiddenSize div numHeads  # 4
-    let batchSize = 1
-
-    # Use a meaningful story prompt
-    let promptText = "Once upon a time, a small dragon named Fluffy wanted to explore the world beyond the mountains."
-    var inputTokens = encodeText(promptText)
-    if inputTokens.len == 0:
-      inputTokens = @[100'i64, 200'i64, 300'i64]
-
-    echo &"Prompt: '{promptText}'"
-    echo &"Encoded {inputTokens.len} tokens"
-    if TokenizerLoaded:
-      let decoded = decodeTokens(inputTokens)
-      echo &"Decoded: '{decoded}'"
-
-    # Generation parameters
-    let maxNewTokens = 10
-    let temperature = 1.0'f32
-
-    echo &"\nGenerating {maxNewTokens} new tokens (with KV-cache)..."
-    echo repeat("-", 50)
-
-    var generatedTokens = inputTokens
-    var kvCache: seq[OnnxOutputTensor] = @[]  # Will hold present_key_values from previous step
-
-    for step in 0 ..< maxNewTokens:
-      let currentSeqLen = if step == 0: inputTokens.len else: 1  # First step uses full prompt, subsequent use single token
-      let currentTokens = if step == 0: inputTokens else: @[generatedTokens[^1]]
-
-      # Create input tensor
-      let inputTensor = OnnxInputTensor(
-        data: currentTokens,
-        shape: @[batchSize.int64, currentSeqLen.int64]
-      )
-
-      # Create attention mask
-      var attentionMaskData = newSeq[int64](currentSeqLen)
-      for i in 0 ..< currentSeqLen:
-        attentionMaskData[i] = 1'i64
-      let attentionMask = OnnxInputTensor(
-        data: attentionMaskData,
-        shape: @[batchSize.int64, currentSeqLen.int64]
-      )
-
-      # Create position IDs
-      var positionIdsData = newSeq[int64](currentSeqLen)
-      let startPos = if step == 0: 0 else: generatedTokens.len - 1
-      for i in 0 ..< currentSeqLen:
-        positionIdsData[i] = (startPos + i).int64
-      let positionIds = OnnxInputTensor(
-        data: positionIdsData,
-        shape: @[batchSize.int64, currentSeqLen.int64]
-      )
-
-      # Prepare past_key_values from KV cache
-      var pastKeyValues: seq[OnnxInputTensor] = @[]
-      if kvCache.len > 0 and kvCache[0].data.len > 0:
-        # Convert present_key_values from previous step to past_key_values for this step
-        for layer in 0 ..< numLayers:
-          for kv in 0 ..< 2:  # key and value
-            let cacheIdx = layer * 2 + kv
-            let cacheTensor = kvCache[cacheIdx]
-            # Convert OnnxOutputTensor (float32) to OnnxInputTensor (int64)
-            # Note: We need to keep the shape but the data type changes
-            var intData = newSeq[int64](cacheTensor.data.len)
-            for i in 0 ..< cacheTensor.data.len:
-              intData[i] = cacheTensor.data[i].int64
-            pastKeyValues.add(OnnxInputTensor(
-              data: intData,
-              shape: cacheTensor.shape
-            ))
-      else:
-        # First step or no cache: create empty past_key_values
-        for layer in 0 ..< numLayers:
-          for kv in 0 ..< 2:
-            pastKeyValues.add(OnnxInputTensor(
-              data: @[],
-              shape: @[batchSize.int64, numHeads.int64, 0'i64, headDim.int64]
-            ))
-
-      # Run inference with KV-cache
-      let output = runInferenceNeoWithCache(model, inputTensor, attentionMask, positionIds, pastKeyValues, numLayers)
-
-      # Update KV cache with present_key_values for next iteration
-      kvCache = output.presentKeyValues
-
-      # Get logits for the last position
-      let vocabSizeInt = output.logits.shape[2].int
-      let lastPosStart = (currentSeqLen - 1) * vocabSizeInt
-      var lastLogits = newSeq[float32](vocabSizeInt)
-      for i in 0 ..< vocabSizeInt:
-        lastLogits[i] = output.logits.data[lastPosStart + i]
-
-      # Sample next token
-      let nextToken = sampleToken(lastLogits, temperature)
-
-      # Check for end of text
-      if nextToken == EosTokenId.int64:
-        echo "<|endoftext|>"
-        break
-
-      generatedTokens.add(nextToken)
-
-      # Show the token
-      var tokenStr = &"[{nextToken}]"
-      if IdToToken.hasKey(nextToken.int):
-        let rawToken = IdToToken[nextToken.int]
-        # Clean up display for special tokens using byte comparison
-        if rawToken.len > 0 and rawToken[0] == '\xc4' and rawToken.len > 1:
-          if rawToken[1] == '\xa0':  # Ġ - space
-            tokenStr = if rawToken.len > 2: " " & rawToken[2..^1] else: " "
-          elif rawToken[1] == '\x8a':  # Ċ - newline
-            tokenStr = if rawToken.len > 2: "\\n" & rawToken[2..^1] else: "\\n"
-          elif rawToken[1] == '\x89':  # ĉ - tab
-            tokenStr = if rawToken.len > 2: "\\t" & rawToken[2..^1] else: "\\t"
-          else:
-            tokenStr = rawToken
-        else:
-          tokenStr = rawToken
-      echo &"Step {step + 1}: Generated token {nextToken} ({tokenStr})"
-
-    echo repeat("-", 50)
-    echo &"\nTotal tokens generated: {generatedTokens.len - inputTokens.len}"
-    echo &"Full token sequence length: {generatedTokens.len}"
-
-    # Try to decode
-    if TokenizerLoaded:
-      let fullText = decodeTokens(generatedTokens)
-      echo &"Full text: '{fullText}'"
-
-      let generatedText = decodeTokens(generatedTokens[inputTokens.len .. ^1])
-      echo &"Generated text: '{generatedText}'"
-
-    echo "=== Generation complete ===\n"
-
-    # Cleanup
+    
+    # Configure generation with quality improvements
+    #
+    # TUNING GUIDE:
+    # =============
+    # 
+    # temperature (0.0 - 2.0+):
+    #   - 0.5-0.7: More focused, deterministic output
+    #   - 0.8-1.0: Balanced creativity (default: 0.8)
+    #   - 1.0+: More random, creative but may be incoherent
+    #
+    # topK (0 - vocab_size):
+    #   - 20-40: Conservative, only most likely tokens
+    #   - 50-100: Balanced variety (recommended: 50)
+    #   - 0: Disabled, consider all tokens
+    #
+    # topP / nucleus (0.0 - 1.0):
+    #   - 0.85-0.90: Tight nucleus, high quality
+    #   - 0.92-0.95: Balanced (recommended: 0.92)
+    #   - 0.99: Almost all tokens considered
+    #
+    # repetitionPenalty (1.0 - 2.0):
+    #   - 1.0: No penalty (may repeat)
+    #   - 1.1-1.2: Gentle reduction (recommended: 1.15)
+    #   - 1.3+: Aggressive (may stop generation early)
+    #
+    # maxNewTokens:
+    #   - 10-20: Short completion (~15-30 words)
+    #   - 50: Paragraph (~75 words)
+    #   - 100-150: Short story (~150-225 words)
+    #   - 200+: Long narrative (quality may degrade with small models)
+    #
+    var config = defaultGenerationConfig()
+    config.maxNewTokens = 150         # Generate ~150 tokens for a short story
+    config.temperature = 0.75'f32     # Balanced creativity
+    config.topK = 50                  # Moderate variety
+    config.topP = 0.92'f32            # Balanced nucleus
+    config.repetitionPenalty = 1.15'f32 # Gentle repetition reduction
+    config.seed = 42
+    randomize(config.seed)
+    
+    let prompt = "Once upon a time, a small dragon named Fluffy wanted to explore the world beyond the mountains."
+    echo "\nPrompt: '" & prompt & "'"
+    echo "Configuration:"
+    echo "  maxNewTokens: " & $config.maxNewTokens
+    echo "  temperature: " & $config.temperature
+    echo "  topK: " & $config.topK
+    echo "  topP: " & $config.topP
+    echo "  repetitionPenalty: " & $config.repetitionPenalty
+    echo "\nGenerating..."
+    echo repeat("-", 60)
+    
+    let (generatedText, tokens, stoppedEarly) = generateText(
+      model, tokenizer, prompt, config,
+      numLayers = 8, numHeads = 16, headDim = 4
+    )
+    
+    echo "\nGenerated text:"
+    echo generatedText
+    echo ""
+    echo repeat("-", 60)
+    echo "Stats:"
+    echo "  Total tokens: " & $tokens.len
+    echo "  New tokens: " & $(tokens.len - tokenizer.encode(prompt).len)
+    echo "  Stopped early: " & $stoppedEarly
+    
     model.close()
-
-    # Verify we generated some tokens
-    check generatedTokens.len > inputTokens.len
+    
+    let inputTokens = tokenizer.encode(prompt)
+    check tokens.len > inputTokens.len
