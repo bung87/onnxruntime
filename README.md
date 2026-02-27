@@ -170,3 +170,16 @@ tests/testdata/onnx-community/whisper-large-v3-chinese-ONNX
 ├── encoder_model.onnx
 └── decoder_model.onnx
 ```
+
+Classification Example: Download the URL-TITLE-classifier model from [Hugging Face](https://huggingface.co/firefoxrecap/URL-TITLE-classifier):
+
+below are the files you need to download:
+
+```bash
+tests/testdata/url-title-classifier
+├── config.json
+├── model.onnx
+├── special_tokens_map.json
+├── tokenizer.json
+└── tokenizer_config.json
+```

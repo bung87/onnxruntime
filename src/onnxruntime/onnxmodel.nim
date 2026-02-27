@@ -908,3 +908,137 @@ proc runInferenceNeoWithCache*(
     ),
     presentKeyValues: presentKeyValues
   )
+
+## Generic multi-input inference for classification models
+
+type
+  NamedInputTensor* = object
+    ## Named input tensor for multi-input models
+    name*: string
+    data*: seq[int64]
+    shape*: seq[int64]
+
+proc runInferenceMultiInput*(
+  model: OnnxModel,
+  inputs: seq[NamedInputTensor],
+  outputName: string = "logits"
+): OnnxOutputTensor =
+  ## Run inference on a model with multiple named inputs.
+  ## This is useful for BERT-like models that require input_ids and attention_mask.
+  ##
+  ## Parameters:
+  ##   inputs: Sequence of named input tensors
+  ##   outputName: Name of the output node (default: "logits")
+  ##
+  ## Returns:
+  ##   Output tensor with model predictions
+  ##
+  ## Example:
+  ##   let inputs = @[
+  ##     NamedInputTensor(name: "input_ids", data: tokenIds, shape: @[1'i64, 512]),
+  ##     NamedInputTensor(name: "attention_mask", data: mask, shape: @[1'i64, 512])
+  ##   ]
+  ##   let output = model.runInferenceMultiInput(inputs)
+  ##
+  var status: OrtStatusPtr
+
+  if inputs.len == 0:
+    raise newException(Exception, "At least one input is required")
+
+  # Create CPU memory info
+  var memoryInfo: OrtMemoryInfo
+  status = CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, memoryInfo.addr)
+  checkStatus(status)
+  defer:
+    ReleaseMemoryInfo(memoryInfo)
+
+  # Create input tensors
+  var inputOrtValues = newSeq[OrtValue](inputs.len)
+  var inputNames = newSeq[cstring](inputs.len)
+
+  for i in 0 ..< inputs.len:
+    if inputs[i].data.len == 0:
+      raise newException(Exception, "Input tensor data cannot be empty: " & inputs[i].name)
+    if inputs[i].shape.len == 0:
+      raise newException(Exception, "Input tensor shape cannot be empty: " & inputs[i].name)
+
+    let dataSize = inputs[i].data.len * sizeof(int64)
+    status = CreateTensorWithDataAsOrtValue(
+      memoryInfo,
+      inputs[i].data[0].unsafeAddr,
+      dataSize.csize_t,
+      inputs[i].shape[0].unsafeAddr,
+      inputs[i].shape.len.csize_t,
+      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
+      inputOrtValues[i].addr
+    )
+    checkStatus(status)
+    inputNames[i] = inputs[i].name.cstring
+
+  # Prepare output name
+  let outputNameC = outputName.cstring
+
+  # Run inference
+  var outputOrtValue: OrtValue = nil
+  status = Run(
+    model.session,
+    nil,  # run_options
+    inputNames[0].addr,
+    inputOrtValues[0].addr,
+    inputs.len.csize_t,
+    outputNameC.addr,
+    1.csize_t,
+    outputOrtValue.addr
+  )
+  checkStatus(status)
+
+  # Get output type info
+  var typeInfo: OrtTypeInfo
+  status = GetTypeInfo(outputOrtValue, typeInfo.addr)
+  checkStatus(status)
+
+  # Cast to tensor info (owned by typeInfo, don't release separately)
+  var tensorInfo: OrtTensorTypeAndShapeInfo
+  status = CastTypeInfoToTensorInfo(typeInfo, tensorInfo.addr)
+  checkStatus(status)
+
+  # Get output dimensions
+  var dimsCount: csize_t
+  status = GetDimensionsCount(tensorInfo, dimsCount.addr)
+  checkStatus(status)
+
+  var outputShape = newSeq[int64](dimsCount)
+  if dimsCount > 0:
+    status = GetDimensions(tensorInfo, outputShape[0].addr, dimsCount)
+    checkStatus(status)
+
+  # Get pointer to output data
+  var outputDataPtr: pointer
+  status = GetTensorMutableData(outputOrtValue, outputDataPtr.addr)
+  checkStatus(status)
+
+  # Get total element count
+  var elemCount: csize_t
+  status = GetTensorShapeElementCount(tensorInfo, elemCount.addr)
+  checkStatus(status)
+
+  # Copy data from OrtValue to Nim seq
+  let floatPtr = cast[ptr UncheckedArray[float32]](outputDataPtr)
+  var outputData = newSeq[float32](elemCount)
+  for i in 0 ..< elemCount.int:
+    outputData[i] = floatPtr[i]
+
+  # Clean up input tensors
+  for i in 0 ..< inputOrtValues.len:
+    if inputOrtValues[i] != nil:
+      ReleaseValue(inputOrtValues[i])
+
+  # Clean up output tensor (this also releases typeInfo and tensorInfo)
+  if outputOrtValue != nil:
+    ReleaseValue(outputOrtValue)
+
+  # Return result
+  result = OnnxOutputTensor(
+    data: outputData,
+    shape: outputShape
+  )

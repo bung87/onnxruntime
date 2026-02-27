@@ -29,6 +29,7 @@ export OnnxRuntimeError, OrtLoggingLevel, ONNXTensorElementDataType, OrtErrorCod
 # Re-export low-level API for backward compatibility and advanced use
 export OnnxModel, newOnnxModel, close, runInference
 export runInferenceNeo, runInferenceNeoComplete, runInferenceNeoWithCache
+export runInferenceMultiInput, NamedInputTensor
 export getModelOutputNames, checkStatus, getSession, ReleaseValue
 
 ## High-level Model type that wraps the low-level OnnxModel
