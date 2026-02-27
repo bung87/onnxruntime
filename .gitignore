@@ -39,3 +39,5 @@ dnimcache/
 *.out
 src/htmldocs
 htmldocs
+nimble.develop
+nimble.paths

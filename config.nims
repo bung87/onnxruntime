@@ -64,3 +64,7 @@ switch("threads", "on")
 if defined(release):
   switch("opt", "speed")
   switch("define", "danger")  # Disable all runtime checks for max performance
+# begin Nimble config (version 2)
+when withDir(thisDir(), system.fileExists("nimble.paths")):
+  include "nimble.paths"
+# end Nimble config

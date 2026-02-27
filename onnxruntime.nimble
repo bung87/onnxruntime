@@ -7,6 +7,7 @@ srcDir        = "src"
 
 # Dependencies
 requires "nim >= 2.0.0"
+requires "https://github.com/arnetheduck/nim-fftr"
 
 # System dependency note:
 # This package requires ONNX Runtime C library to be installed on your system.

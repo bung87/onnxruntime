@@ -8,14 +8,17 @@ import onnxruntime/ort_bindings
 import std/json
 
 const TestDataDir = "tests/testdata/whisper-large-v3-zh"
-const EncoderPath = TestDataDir / "encoder_model.onnx"
-const DecoderPath = TestDataDir / "decoder_model.onnx"
-const ConfigPath = TestDataDir / "config.json"
-const GenerationConfigPath = TestDataDir / "generation_config.json"
-const SpecialTokensMapPath = TestDataDir / "special_tokens_map.json"
-const TokenizerPath = TestDataDir / "tokenizer.json"
-const VocabPath = TestDataDir / "vocab.json"
+const ConfigDataDir = TestDataDir / "onnx-community" / "whisper-large-v3-chinese-ONNX"
+const ModelDataDir = ConfigDataDir / "onnx"
+const EncoderPath = ModelDataDir / "encoder_model.onnx"
+const DecoderPath = ModelDataDir / "decoder_model.onnx"
+const ConfigPath = ConfigDataDir / "config.json"
+const GenerationConfigPath = ConfigDataDir / "generation_config.json"
+const SpecialTokensMapPath = ConfigDataDir / "special_tokens_map.json"
+const TokenizerPath = ConfigDataDir / "tokenizer.json"
+const VocabPath = ConfigDataDir / "vocab.json"
 const TestAudioPath = TestDataDir / "test_input.wav"
+const MelSpectrogramPath = TestDataDir / "mel_spectrogram.bin"
 
 # Whisper constants
 const WHISPER_SAMPLE_RATE = 16000
@@ -206,6 +209,31 @@ proc loadWavFile(path: string): seq[float32] =
       monoSamples[i] = (result[i*2] + result[i*2+1]) / 2.0'f32
     result = monoSamples
 
+proc loadMelSpectrogram(path: string): seq[float32] =
+  ## Load pre-computed mel spectrogram from binary file
+  ## The file contains float32 values in little-endian format
+  let file = open(path, fmRead)
+  defer: file.close()
+  
+  let fileSize = file.getFileSize()
+  let numElements = fileSize div sizeof(float32)
+  result = newSeq[float32](numElements)
+  
+  var buffer: array[4, uint8]
+  for i in 0 ..< numElements:
+    let bytesRead = file.readBytes(buffer, 0, 4)
+    if bytesRead != 4:
+      raise newException(IOError, &"Failed to read mel spectrogram element {i}")
+    
+    # Convert bytes to float32 (little-endian)
+    var temp: float32
+    let tempBytes = cast[ptr array[4, uint8]](addr(temp))
+    tempBytes[0] = buffer[0]
+    tempBytes[1] = buffer[1]
+    tempBytes[2] = buffer[2]
+    tempBytes[3] = buffer[3]
+    result[i] = temp
+
 proc computeStft(audio: seq[float32], nFft: int, hopLength: int): seq[seq[Complex[float32]]] =
   ## Compute Short-Time Fourier Transform
   ## Returns complex spectrogram [nFrames][nFft//2+1]
@@ -312,8 +340,188 @@ proc initTokenizer() =
         if idx < IdToToken.len:
           IdToToken[idx] = content
 
+# Byte-to-Unicode mapping for GPT-2/Whisper tokenizer
+var ByteToUnicode: seq[string]
+var UnicodeToByte: Table[string, byte]
+var ByteToUnicodeInitialized = false
+
+proc initByteToUnicode() =
+  ## Initialize ByteToUnicode mapping for proper token decoding
+  if ByteToUnicodeInitialized:
+    return
+  
+  ByteToUnicode = newSeq[string](256)
+  UnicodeToByte = initTable[string, byte]()
+  
+  # Printable ASCII characters (33-126) map to themselves
+  for b in 33 .. 126:
+    ByteToUnicode[b] = $chr(b)
+  
+  # Latin-1 supplement characters
+  let latin1Chars = [
+    (161, "¡"), (162, "¢"), (163, "£"), (164, "¤"), (165, "¥"),
+    (166, "¦"), (167, "§"), (168, "¨"), (169, "©"), (170, "ª"),
+    (171, "«"), (172, "¬"), (174, "®"), (175, "¯"), (176, "°"),
+    (177, "±"), (178, "²"), (179, "³"), (180, "´"), (181, "µ"),
+    (182, "¶"), (183, "·"), (184, "¸"), (185, "¹"), (186, "º"),
+    (187, "»"), (188, "¼"), (189, "½"), (190, "¾"), (191, "¿"),
+    (192, "À"), (193, "Á"), (194, "Â"), (195, "Ã"), (196, "Ä"),
+    (197, "Å"), (198, "Æ"), (199, "Ç"), (200, "È"), (201, "É"),
+    (202, "Ê"), (203, "Ë"), (204, "Ì"), (205, "Í"), (206, "Î"),
+    (207, "Ï"), (208, "Ð"), (209, "Ñ"), (210, "Ò"), (211, "Ó"),
+    (212, "Ô"), (213, "Õ"), (214, "Ö"), (215, "×"), (216, "Ø"),
+    (217, "Ù"), (218, "Ú"), (219, "Û"), (220, "Ü"), (221, "Ý"),
+    (222, "Þ"), (223, "ß"), (224, "à"), (225, "á"), (226, "â"),
+    (227, "ã"), (228, "ä"), (229, "å"), (230, "æ"), (231, "ç"),
+    (232, "è"), (233, "é"), (234, "ê"), (235, "ë"), (236, "ì"),
+    (237, "í"), (238, "î"), (239, "ï"), (240, "ð"), (241, "ñ"),
+    (242, "ò"), (243, "ó"), (244, "ô"), (245, "õ"), (246, "ö"),
+    (247, "÷"), (248, "ø"), (249, "ù"), (250, "ú"), (251, "û"),
+    (252, "ü"), (253, "ý"), (254, "þ"), (255, "ÿ")
+  ]
+  
+  for (byteVal, charStr) in latin1Chars:
+    ByteToUnicode[byteVal] = charStr
+  
+  # Remaining bytes map to Unicode characters starting at 0x0100
+  var nextUnicode = 0x0100
+  for b in 0 .. 255:
+    if ByteToUnicode[b].len == 0:
+      # Convert codepoint to UTF-8 string
+      if nextUnicode <= 0x7F:
+        ByteToUnicode[b] = $chr(nextUnicode)
+      elif nextUnicode <= 0x7FF:
+        var s = newString(2)
+        s[0] = chr(0xC0 or ((nextUnicode shr 6) and 0x1F))
+        s[1] = chr(0x80 or (nextUnicode and 0x3F))
+        ByteToUnicode[b] = s
+      elif nextUnicode <= 0xFFFF:
+        var s = newString(3)
+        s[0] = chr(0xE0 or ((nextUnicode shr 12) and 0x0F))
+        s[1] = chr(0x80 or ((nextUnicode shr 6) and 0x3F))
+        s[2] = chr(0x80 or (nextUnicode and 0x3F))
+        ByteToUnicode[b] = s
+      else:
+        var s = newString(4)
+        s[0] = chr(0xF0 or ((nextUnicode shr 18) and 0x07))
+        s[1] = chr(0x80 or ((nextUnicode shr 12) and 0x3F))
+        s[2] = chr(0x80 or ((nextUnicode shr 6) and 0x3F))
+        s[3] = chr(0x80 or (nextUnicode and 0x3F))
+        ByteToUnicode[b] = s
+      nextUnicode.inc
+  
+  # Build reverse mapping
+  for b in 0 .. 255:
+    UnicodeToByte[ByteToUnicode[b]] = b.byte
+  
+  ByteToUnicodeInitialized = true
+
+proc decodeTokenToBytes(token: string): seq[byte] =
+  ## Decode a token string back to bytes using ByteToUnicode mapping
+  if token.len == 0:
+    return @[]
+  
+  result = @[]
+  var i = 0
+  while i < token.len:
+    var charStr: string
+    let c = token[i]
+    let ordC = ord(c)
+    
+    # Parse UTF-8 character
+    if ordC < 0x80:
+      charStr = $c
+      i += 1
+    elif (ordC and 0xE0) == 0xC0 and i + 1 < token.len:
+      charStr = token[i .. i+1]
+      i += 2
+    elif (ordC and 0xF0) == 0xE0 and i + 2 < token.len:
+      charStr = token[i .. i+2]
+      i += 3
+    elif (ordC and 0xF8) == 0xF0 and i + 3 < token.len:
+      charStr = token[i .. i+3]
+      i += 4
+    else:
+      charStr = $c
+      i += 1
+    
+    # Look up byte value
+    if UnicodeToByte.hasKey(charStr):
+      result.add(UnicodeToByte[charStr])
+    else:
+      # If not in mapping, just use the character directly
+      for b in charStr:
+        result.add(ord(b).byte)
+
+proc isCompleteUtf8(bytes: seq[byte]): tuple[complete: bool, consumed: int] =
+  ## Check if bytes form a complete UTF-8 sequence
+  if bytes.len == 0:
+    return (true, 0)
+  
+  let first = bytes[0].int
+  if first < 0x80:
+    return (true, 1)
+  elif (first and 0xE0) == 0xC0:
+    if bytes.len < 2 or (bytes[1].int and 0xC0) != 0x80:
+      return (false, 0)
+    return (true, 2)
+  elif (first and 0xF0) == 0xE0:
+    if bytes.len < 3 or (bytes[1].int and 0xC0) != 0x80 or (bytes[2].int and 0xC0) != 0x80:
+      return (false, 0)
+    return (true, 3)
+  elif (first and 0xF8) == 0xF0:
+    if bytes.len < 4 or (bytes[1].int and 0xC0) != 0x80 or (bytes[2].int and 0xC0) != 0x80 or (bytes[3].int and 0xC0) != 0x80:
+      return (false, 0)
+    return (true, 4)
+  else:
+    return (true, 1)
+
+proc decodeTokensToText(tokenIds: seq[int64]): string =
+  ## Decode a sequence of token IDs to text
+  ## Handles ByteToUnicode mapping for proper UTF-8 output
+  result = ""
+  var pendingBytes: seq[byte] = @[]
+  
+  if not ByteToUnicodeInitialized:
+    initByteToUnicode()
+  
+  for tokenId in tokenIds:
+    if tokenId < 0 or tokenId >= IdToToken.len:
+      continue
+    
+    let token = IdToToken[tokenId.int]
+    if token.len == 0:
+      continue
+    
+    # Skip special tokens
+    if token.startsWith("<|") and token.endsWith("|>"):
+      continue
+    
+    # Decode token to bytes
+    let tokenBytes = decodeTokenToBytes(token)
+    for b in tokenBytes:
+      pendingBytes.add(b)
+    
+    # Try to form complete UTF-8 characters
+    while true:
+      let (complete, consumed) = isCompleteUtf8(pendingBytes)
+      if complete and consumed > 0:
+        var validSeq = newString(consumed)
+        for i in 0 ..< consumed:
+          validSeq[i] = chr(pendingBytes[i].int)
+        result.add(validSeq)
+        pendingBytes = pendingBytes[consumed .. ^1]
+      else:
+        break
+  
+  # Handle any remaining bytes
+  if pendingBytes.len > 0:
+    for b in pendingBytes:
+      if b < 128:
+        result.add(chr(b.int))
+
 proc tokenToText(tokenId: int64): string =
-  ## Convert token ID to text
+  ## Convert token ID to text (single token, for debugging)
   if tokenId >= 0 and tokenId < IdToToken.len:
     return IdToToken[tokenId.int]
   return &"<token_{tokenId}>"
@@ -466,26 +674,18 @@ suite "Whisper ASR Tests":
       echo &"Mel spectrogram range: [{minVal:.4f}, {maxVal:.4f}]"
 
   test "Full ASR pipeline - encode and decode":
-    if not fileExists(EncoderPath) or not fileExists(DecoderPath) or not fileExists(TestAudioPath):
+    if not fileExists(EncoderPath) or not fileExists(DecoderPath) or not fileExists(MelSpectrogramPath):
       skip()
     else:
       echo "\n=== Starting Full ASR Pipeline ==="
       
-      # Step 1: Load and preprocess audio
-      let audio = loadWavFile(TestAudioPath)
-      var melSpec = audioToMelSpectrogram(audio, WHISPER_N_MELS)
-
-      # Pad or truncate to 3000 frames (30 seconds)
-      let nFrames = melSpec.len div WHISPER_N_MELS
-      let targetFrames = 3000
-
-      var paddedMelSpec = newSeq[float32](WHISPER_N_MELS * targetFrames)
-      for m in 0 ..< WHISPER_N_MELS:
-        for t in 0 ..< targetFrames:
-          if t < nFrames:
-            paddedMelSpec[m * targetFrames + t] = melSpec[m * nFrames + t]
-          else:
-            paddedMelSpec[m * targetFrames + t] = 0.0'f32
+      # Step 1: Load pre-computed mel spectrogram
+      echo "Loading pre-computed mel spectrogram..."
+      let melSpec = loadMelSpectrogram(MelSpectrogramPath)
+      check melSpec.len == WHISPER_N_MELS * 3000  # Should be 80 x 3000 = 240000
+      
+      echo &"Mel spectrogram loaded: {melSpec.len} elements"
+      echo &"Mel spectrogram range: [{melSpec.min:.4f}, {melSpec.max:.4f}]"
 
       # Step 2: Run encoder
       let encoder = newOnnxModel(EncoderPath)
@@ -494,12 +694,12 @@ suite "Whisper ASR Tests":
       var status = CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, memoryInfo.addr)
       checkStatus(status)
 
-      var inputShape = @[1'i64, WHISPER_N_MELS.int64, targetFrames.int64]
+      var inputShape = @[1'i64, WHISPER_N_MELS.int64, 3000'i64]
       var encoderInput: OrtValue
       status = CreateTensorWithDataAsOrtValue(
         memoryInfo,
-        paddedMelSpec[0].unsafeAddr,
-        (paddedMelSpec.len * sizeof(float32)).csize_t,
+        melSpec[0].unsafeAddr,
+        (melSpec.len * sizeof(float32)).csize_t,
         inputShape[0].unsafeAddr,
         inputShape.len.csize_t,
         ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
@@ -677,12 +877,8 @@ suite "Whisper ASR Tests":
       echo "\n=== ASR Results ==="
       echo &"Generated {generatedTokens.len} tokens: {generatedTokens}"
       
-      var resultText = ""
-      for token in generatedTokens:
-        let tokenStr = tokenToText(token)
-        # Remove special token markers for display
-        if not tokenStr.startsWith("<"):
-          resultText.add(tokenStr)
+      # Use proper ByteToUnicode decoding for Whisper tokens
+      let resultText = decodeTokensToText(generatedTokens)
       
       echo &"Transcription: '{resultText}'"
       echo "==================="
