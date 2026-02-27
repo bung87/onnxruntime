@@ -1,8 +1,7 @@
 ## test_whisper_asr_merged_fp16.nim
 ## Test Whisper merged FP16 decoder
 ##
-## NOTE: KV-cache mode (use_cache=true) produces incorrect results with this FP16 model.
-## The reliable approach is to always use use_cache=false and pass the full sequence.
+
 
 import std/[unittest, os, json, strutils]
 import onnxruntime
