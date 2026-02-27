@@ -32,6 +32,7 @@ export runInferenceNeo, runInferenceNeoComplete, runInferenceNeoWithCache
 export runInferenceMultiInput, NamedInputTensor
 export getModelOutputNames, checkStatus, getSession, ReleaseValue
 
+
 ## High-level Model type that wraps the low-level OnnxModel
 type
   Model* = ref object
