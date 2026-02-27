@@ -9,8 +9,7 @@ import tables
 import os
 import strformat
 
-import onnxruntime
-import onnxruntime/ort_bindings
+import onnxruntime, piper_utils
 
 # Test paths
 const TestDataDir = "tests/testdata/piper-voices"
@@ -143,152 +142,7 @@ proc getSpeakerId(config: PiperConfig, speakerName: string = ""): int64 =
 
   return 0'i64
 
-proc runPiperInference(
-  model: OnnxModel,
-  phonemeIds: seq[int64],
-  config: PiperConfig,
-  speakerId: int = 0
-): OnnxOutputTensor =
-  ## Run inference on Piper TTS model
-  ## Piper models typically expect:
-  ##   - input: phoneme IDs [batch_size, seq_len]
-  ##   - input_lengths: sequence lengths [batch_size]
-  ##   - scales: [noise_scale, length_scale, noise_w] [3] or [batch_size, 3]
-  ##   - sid: speaker ID (optional, for multi-speaker) [batch_size]
 
-  let batchSize = 1'i64
-  let seqLen = phonemeIds.len.int64
-
-  var status: OrtStatusPtr
-
-  # Create CPU memory info
-  var memoryInfo: OrtMemoryInfo
-  status = CreateCpuMemoryInfo(OrtArenaAllocator, OrtMemTypeDefault, memoryInfo.addr)
-  checkStatus(status)
-
-  # Prepare shapes as variables (needed for taking address)
-  var inputShape = @[batchSize, seqLen]
-  var lengthShape = @[batchSize]
-  var scalesShape = @[3'i64]
-
-  # Create input tensor (phoneme IDs)
-  var inputOrtValue: OrtValue = nil
-  let inputDataSize = phonemeIds.len * sizeof(int64)
-  status = CreateTensorWithDataAsOrtValue(
-    memoryInfo,
-    phonemeIds[0].unsafeAddr,
-    inputDataSize.csize_t,
-    inputShape[0].unsafeAddr,
-    inputShape.len.csize_t,
-    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-    inputOrtValue.addr
-  )
-  checkStatus(status)
-
-  # Create input_lengths tensor
-  var lengthData = @[seqLen]
-  var lengthOrtValue: OrtValue = nil
-  status = CreateTensorWithDataAsOrtValue(
-    memoryInfo,
-    lengthData[0].unsafeAddr,
-    sizeof(int64).csize_t,
-    lengthShape[0].unsafeAddr,
-    lengthShape.len.csize_t,
-    ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-    lengthOrtValue.addr
-  )
-  checkStatus(status)
-
-  # Create scales tensor [noise_scale, length_scale, noise_w] as float32
-  var scalesData = @[config.noiseScale, config.lengthScale, config.noiseW]
-  var scalesOrtValue: OrtValue = nil
-  status = CreateTensorWithDataAsOrtValue(
-    memoryInfo,
-    scalesData[0].unsafeAddr,
-    (3 * sizeof(float32)).csize_t,
-    scalesShape[0].unsafeAddr,
-    scalesShape.len.csize_t,
-    ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT,
-    scalesOrtValue.addr
-  )
-  checkStatus(status)
-
-  # Prepare input names and values
-  # Typical Piper model inputs: input, input_lengths, scales, (optional) sid
-  var inputNames: seq[cstring] = @["input".cstring, "input_lengths".cstring, "scales".cstring]
-  var inputs: seq[OrtValue] = @[inputOrtValue, lengthOrtValue, scalesOrtValue]
-
-  # Add speaker ID if multi-speaker model
-  var sidOrtValue: OrtValue = nil
-  if config.numSpeakers > 1:
-    var sidData = @[speakerId.int64]
-    status = CreateTensorWithDataAsOrtValue(
-      memoryInfo,
-      sidData[0].unsafeAddr,
-      sizeof(int64).csize_t,
-      lengthShape[0].unsafeAddr,  # Reuse batch size shape
-      lengthShape.len.csize_t,
-      ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64,
-      sidOrtValue.addr
-    )
-    checkStatus(status)
-    inputNames.add("sid".cstring)
-    inputs.add(sidOrtValue)
-
-  # Run inference
-  let outputName = "output".cstring
-  var outputOrtValue: OrtValue = nil
-  status = Run(
-    getSession(model),
-    nil,  # run_options
-    inputNames[0].addr,
-    inputs[0].addr,
-    inputs.len.csize_t,
-    outputName.addr,
-    1.csize_t,
-    outputOrtValue.addr
-  )
-  checkStatus(status)
-
-  # Get output info
-  var typeInfo: OrtTypeInfo
-  status = GetTypeInfo(outputOrtValue, typeInfo.addr)
-  checkStatus(status)
-
-  var tensorInfo: OrtTensorTypeAndShapeInfo
-  status = CastTypeInfoToTensorInfo(typeInfo, tensorInfo.addr)
-  checkStatus(status)
-
-  # Get output shape
-  var dimsCount: csize_t
-  status = GetDimensionsCount(tensorInfo, dimsCount.addr)
-  checkStatus(status)
-
-  var outputShape = newSeq[int64](dimsCount)
-  if dimsCount > 0:
-    status = GetDimensions(tensorInfo, outputShape[0].addr, dimsCount)
-    checkStatus(status)
-
-  # Get output data
-  var outputDataPtr: pointer
-  status = GetTensorMutableData(outputOrtValue, outputDataPtr.addr)
-  checkStatus(status)
-
-  var elemCount: csize_t
-  status = GetTensorShapeElementCount(tensorInfo, elemCount.addr)
-  checkStatus(status)
-
-  # Copy data to Nim seq (must do this before releasing outputOrtValue)
-  let floatPtr = cast[ptr UncheckedArray[float32]](outputDataPtr)
-  var outputData = newSeq[float32](elemCount)
-  for i in 0 ..< elemCount.int:
-    outputData[i] = floatPtr[i]
-
-  # Store result before cleanup
-  result = OnnxOutputTensor(
-    data: outputData,
-    shape: outputShape
-  )
 
 
 suite "Piper TTS Tests":
@@ -328,23 +182,25 @@ suite "Piper TTS Tests":
 
     # Load configuration and model
     let config = loadConfig(ConfigPath)
-    let model = newOnnxModel(ModelPath)
+    let model = loadModel(ModelPath)
 
     # Use static test phonemes
     let phonemes = TestPhonemes
     let phonemeIds = phonemesToIds(phonemes, config.phonemeIdMap)
     let speakerId = getSpeakerId(config)
-    let output = runPiperInference(model, phonemeIds, config, speakerId.int)
+    let hasSpeakerId = config.numSpeakers > 1
+    let output = runPiper(
+      model, phonemeIds,
+      noiseScale = config.noiseScale,
+      lengthScale = config.lengthScale,
+      noiseW = config.noiseW,
+      speakerId = speakerId.int,
+      hasSpeakerId = hasSpeakerId
+    )
 
     # Save as WAV file (16-bit signed integers, mono)
     let outputPath = TestDataDir / "test_output.wav"
-    var pcmData = newSeq[int16](output.data.len)
-
-    for i in 0 ..< output.data.len:
-      # Convert float32 [-1, 1] to int16 [-32768, 32767]
-      let sample = output.data[i]
-      let clamped = max(-1.0'f32, min(1.0'f32, sample))
-      pcmData[i] = int16(clamped * 32767.0'f32)
+    let pcmData = output.toInt16Samples()
 
     # Write WAV file with header
     var f = open(outputPath, fmWrite)

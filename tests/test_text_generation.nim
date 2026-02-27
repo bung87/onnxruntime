@@ -13,7 +13,7 @@ import algorithm
 import sets
 import hashes
 
-import onnxruntime
+import onnxruntime, gpt_neo_utils
 
 #==============================================================================
 # Configuration Types
@@ -432,7 +432,7 @@ proc shouldStopGeneration*(text: string, config: GenerationConfig): bool =
 #==============================================================================
 
 proc generateText*(
-  model: OnnxModel,
+  model: Model,
   tokenizer: Tokenizer,
   prompt: string,
   config: GenerationConfig,
@@ -456,45 +456,24 @@ proc generateText*(
     let currentSeqLen = generatedTokens.len
     
     # Create input tensor
-    let inputTensor = OnnxInputTensor(
-      data: generatedTokens,
-      shape: @[batchSize, currentSeqLen.int64]
-    )
+    let inputTensor = newInputTensor(generatedTokens, shape = @[batchSize, currentSeqLen.int64])
     
     # Create attention mask
-    var attentionMaskData = newSeq[int64](currentSeqLen)
-    for i in 0 ..< currentSeqLen:
-      attentionMaskData[i] = 1'i64
-    let attentionMask = OnnxInputTensor(
-      data: attentionMaskData,
-      shape: @[batchSize, currentSeqLen.int64]
-    )
+    let attentionMask = createAttentionMask(currentSeqLen, batchSize = 1)
     
     # Create position IDs
-    var positionIdsData = newSeq[int64](currentSeqLen)
-    for i in 0 ..< currentSeqLen:
-      positionIdsData[i] = i.int64
-    let positionIds = OnnxInputTensor(
-      data: positionIdsData,
-      shape: @[batchSize, currentSeqLen.int64]
-    )
+    let positionIds = createPositionIds(currentSeqLen, batchSize = 1)
     
     # Create empty past_key_values
-    var pastKeyValues: seq[OnnxInputTensor] = @[]
-    for layer in 0 ..< numLayers:
-      for kv in 0 ..< 2:
-        pastKeyValues.add(OnnxInputTensor(
-          data: @[],
-          shape: @[batchSize, numHeads.int64, 0'i64, headDim.int64]
-        ))
+    let pastKeyValues = createEmptyPastKeyValues(numLayers, numHeads, headDim, batchSize = 1, seqLen = 0)
     
     # Run inference
-    let output = runInferenceNeoWithCache(
+    let output = runNeoWithCache(
       model, inputTensor, attentionMask, positionIds, pastKeyValues, numLayers
     )
     
     # Get logits for last position
-    let vocabSize = output.logits.shape[2].int
+    let vocabSize = output.logits.vocabSize.int
     let lastPosStart = (currentSeqLen - 1) * vocabSize
     var lastLogits = newSeq[float32](vocabSize)
     for i in 0 ..< vocabSize:
@@ -577,7 +556,7 @@ suite "Text Generation Tests":
     
     echo "\n=== Text Generation Test ==="
     echo "Loading model from " & ModelPath & "..."
-    let model = newOnnxModel(ModelPath)
+    let model = loadModel(ModelPath)
     echo "Model loaded successfully!"
     
     # Configure generation with quality improvements
