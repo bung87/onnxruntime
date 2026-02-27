@@ -1,4 +1,4 @@
-## test_kv_cache.nim
+## test_text_generation.nim
 ## Test text generation with proper KV-cache handling
 ## This captures present_key_values from outputs and feeds them back as past_key_values
 
