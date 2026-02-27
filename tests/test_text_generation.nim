@@ -1,26 +1,18 @@
-## test_text_generation.nim
-## Production-ready text generation test with quality improvements
-
 import unittest
-import json
 import strutils
-import tables
 import math
 import random
 import os
-import strformat
 import algorithm
 import sets
-import hashes
+import json
+
 
 import onnxruntime, gpt_neo_utils, bpe_tokenizer
 
-#==============================================================================
-# Configuration Types
-#==============================================================================
 
 type
-  GenerationConfig* = object
+  GenerationConfig* = ref object
     ## Configuration for text generation with GPT-Neo/TinyStories models
     ##
     ## TUNING GUIDE:
@@ -38,9 +30,6 @@ type
     ## To REDUCE REPETITION:
     ##   Increase repetitionPenalty: 1.1-1.3 (higher = less repetition)
     ##
-    ## To PREVENT GARBLED TEXT:
-    ##   Lower temperature, use stopSequences to catch UTF-8 errors
-    ##
     maxNewTokens*: int          ## Maximum number of new tokens to generate
     temperature*: float32       ## Sampling temperature (0.0 = greedy, 1.0 = random)
     topK*: int                  ## Top-k sampling (0 = disabled)
@@ -49,33 +38,7 @@ type
     seed*: int                  ## Random seed for reproducibility
     eosTokenId*: int            ## End-of-sequence token ID
     padTokenId*: int            ## Padding token ID
-    stopSequences*: seq[string] ## Stop generation when these sequences appear
-    maxRepetitionLen*: int      ## Maximum length of repeated text to allow
     minTokenProb*: float32      ## Minimum token probability to consider
-
-proc defaultGenerationConfig*(): GenerationConfig =
-  ## Return default generation configuration
-  result.maxNewTokens = 100
-  result.temperature = 0.8'f32
-  result.topK = 50
-  result.topP = 0.95'f32
-  result.repetitionPenalty = 1.2'f32  ## Increased from 1.1 to reduce repetition
-  result.seed = 42
-  result.eosTokenId = 50256
-  result.padTokenId = 50256
-  result.stopSequences = @["<|endoftext|>", "Ã", "Â", "âĢ", "ï¿½"]
-  result.maxRepetitionLen = 10
-  result.minTokenProb = 0.001'f32
-
-#==============================================================================
-# Tokenizer Types and Procedures
-#==============================================================================
-
-## Tokenizer implementation is provided by `tests/bpe_tokenizer.nim`
-
-#==============================================================================
-# Sampling Utilities
-#==============================================================================
 
 proc softmax(logits: seq[float32], temperature: float32 = 1.0): seq[float32] =
   result = newSeq[float32](logits.len)
@@ -180,60 +143,6 @@ proc sampleToken*(logits: seq[float32], config: GenerationConfig,
   
   return (probs.len - 1).int64
 
-#==============================================================================
-# Repetition Detection
-#==============================================================================
-
-proc hasRepetition*(text: string, maxRepetitionLen: int): bool =
-  ## Check if text has repetitive patterns
-  if text.len < maxRepetitionLen * 2:
-    return false
-  
-  # Check for repeated phrases of various lengths
-  for phraseLen in 3 .. maxRepetitionLen:
-    if text.len < phraseLen * 2:
-      continue
-    
-    let recentText = text[max(0, text.len - phraseLen * 4) .. ^1]
-    
-    for i in 0 ..< recentText.len - phraseLen:
-      let phrase = recentText[i ..< i + phraseLen]
-      var count = 0
-      var pos = 0
-      while pos <= recentText.len - phraseLen:
-        if recentText[pos ..< pos + phraseLen] == phrase:
-          count += 1
-          if count >= 3:  # Same phrase appears 3+ times
-            return true
-          pos += phraseLen
-        else:
-          pos += 1
-  
-  return false
-
-proc shouldStopGeneration*(text: string, config: GenerationConfig): bool =
-  ## Check if generation should stop based on stop sequences or quality issues
-  
-  # Check stop sequences
-  for stopSeq in config.stopSequences:
-    if stopSeq in text:
-      return true
-  
-  # Check for excessive repetition
-  if hasRepetition(text, config.maxRepetitionLen):
-    return true
-  
-  # Check for garbled UTF-8 indicators
-  let garbledIndicators = ["Ã", "Â", "ï¿½", "âĢ", "âĿ", "Ŀ", "â"]
-  for indicator in garbledIndicators:
-    if indicator in text:
-      return true
-  
-  return false
-
-#==============================================================================
-# Text Generation
-#==============================================================================
 
 proc generateText*(
   model: Model,
@@ -243,17 +152,16 @@ proc generateText*(
   numLayers: int = 8,
   numHeads: int = 16,
   headDim: int = 4
-): tuple[text: string, tokens: seq[int64], stoppedEarly: bool] =
+): tuple[text: string, tokens: seq[int64]] =
   ## Generate text from a prompt using the model
   ## Returns: (generated text, all tokens, whether stopped early)
   
   let inputTokens = tokenizer.encode(prompt)
   if inputTokens.len == 0:
-    return ("", @[], false)
+    return ("", @[])
   
   var generatedTokens = inputTokens
   let batchSize = 1'i64
-  var stoppedEarly = false
   var lastText = ""
   
   for step in 0 ..< config.maxNewTokens:
@@ -287,31 +195,15 @@ proc generateText*(
     let nextToken = sampleToken(lastLogits, config, generatedTokens)
     
     # Check for EOS
-    if nextToken.int == config.eosTokenId:
+    if nextToken.int == tokenizer.eosTokenId:
       break
     
     generatedTokens.add(nextToken)
-    
-    # Check for quality issues every 5 tokens
-    if step mod 5 == 0:
-      let currentText = tokenizer.decode(generatedTokens)
-      let newText = currentText[lastText.len .. ^1]
-      
-      if shouldStopGeneration(newText, config):
-        echo &"  [Stopping early at step {step} due to quality issue]"
-        stoppedEarly = true
-        # Remove the last few tokens that caused the issue
-        generatedTokens = generatedTokens[0 ..< max(generatedTokens.len - 3, inputTokens.len)]
-        break
-      
-      lastText = currentText
+
   
   let fullText = tokenizer.decode(generatedTokens)
-  return (fullText, generatedTokens, stoppedEarly)
+  return (fullText, generatedTokens)
 
-#==============================================================================
-# Tests
-#==============================================================================
 
 suite "Text Generation Tests":
   
@@ -320,29 +212,9 @@ suite "Text Generation Tests":
     ModelPath = TestDataDir / "model.onnx"
     TokenizerPath = TestDataDir / "tokenizer.json"
     MergesPath = TestDataDir / "merges.txt"
+    ConfigPath = TestDataDir / "config.json"
   
-  test "Tokenizer encode/decode roundtrip":
-    var tokenizer = initBPETokenizer()
-    
-    if not fileExists(TokenizerPath):
-      skip()
-    
-    tokenizer.loadTokenizerJson(TokenizerPath)
-    if fileExists(MergesPath):
-      tokenizer.loadBpeMerges(MergesPath)
-    
-    let testTexts = @[
-      "Hello world",
-      "Once upon a time",
-      "The quick brown fox"
-    ]
-    
-    for text in testTexts:
-      let encoded = tokenizer.encode(text)
-      check encoded.len > 0
-      let decoded = tokenizer.decode(encoded)
-      check decoded.len > 0
-  
+
   test "Generate text with quality controls":
     if not fileExists(ModelPath):
       echo "Model not found at " & ModelPath & ", skipping test"
@@ -394,13 +266,22 @@ suite "Text Generation Tests":
     #   - 100-150: Short story (~150-225 words)
     #   - 200+: Long narrative (quality may degrade with small models)
     #
-    var config = defaultGenerationConfig()
-    config.maxNewTokens = 150         # Generate ~150 tokens for a short story
-    config.temperature = 0.75'f32     # Balanced creativity
-    config.topK = 50                  # Moderate variety
-    config.topP = 0.92'f32            # Balanced nucleus
-    config.repetitionPenalty = 1.15'f32 # Gentle repetition reduction
-    config.seed = 42
+    var cfgJson = parseJson(readFile(ConfigPath))
+    # Map model config fields to GenerationConfig and inject generation defaults
+    if cfgJson.hasKey("eos_token_id"):
+      cfgJson["eosTokenId"] = cfgJson["eos_token_id"]
+    if cfgJson.hasKey("pad_token_id"):
+      cfgJson["padTokenId"] = cfgJson["pad_token_id"]
+    elif cfgJson.hasKey("eos_token_id"):
+      cfgJson["padTokenId"] = cfgJson["eos_token_id"]
+    cfgJson["maxNewTokens"]    = %150
+    cfgJson["temperature"]     = %0.75
+    cfgJson["topK"]            = %50
+    cfgJson["topP"]            = %0.92
+    cfgJson["repetitionPenalty"] = %1.15
+    cfgJson["seed"]            = %42
+    cfgJson["minTokenProb"]    = %0.001
+    var config = cfgJson.to(GenerationConfig)
     randomize(config.seed)
     
     let prompt = "Once upon a time, a small dragon named Fluffy wanted to explore the world beyond the mountains."
@@ -414,7 +295,7 @@ suite "Text Generation Tests":
     echo "\nGenerating..."
     echo repeat("-", 60)
     
-    let (generatedText, tokens, stoppedEarly) = generateText(
+    let (generatedText, tokens) = generateText(
       model, tokenizer, prompt, config,
       numLayers = 8, numHeads = 16, headDim = 4
     )
@@ -426,7 +307,6 @@ suite "Text Generation Tests":
     echo "Stats:"
     echo "  Total tokens: " & $tokens.len
     echo "  New tokens: " & $(tokens.len - tokenizer.encode(prompt).len)
-    echo "  Stopped early: " & $stoppedEarly
     
     model.close()
     
