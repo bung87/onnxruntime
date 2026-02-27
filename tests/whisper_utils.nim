@@ -54,9 +54,9 @@ proc hertzToMel*(htk: float): float =
 proc melToHertz*(mel: float): float =
   700.0 * (pow(10.0, mel / 2595.0) - 1.0)
 
-proc createMelFilterbank*(nFft, nMels, sampleRate: int): seq[seq[float32]] =
+proc createMelFilterbank*(nFft, nMels, sampleRate: int): seq[float32] =
   ## Create mel filterbank matching transformers' implementation
-  ## Returns filterbank of shape (nFft//2 + 1, nMels)
+  ## Returns flat filterbank of shape (nFft//2 + 1, nMels)
   let numFreqBins = nFft div 2 + 1
   
   let melMin = hertzToMel(MEL_FMIN)
@@ -71,21 +71,23 @@ proc createMelFilterbank*(nFft, nMels, sampleRate: int): seq[seq[float32]] =
   for i in 0 ..< numFreqBins:
     fftFreqs[i] = (sampleRate.float / 2.0) * i.float / (numFreqBins - 1).float
   
-  result = newSeq[seq[float32]](numFreqBins)
+  # Flat array: result[freqIdx * nMels + melIdx]
+  result = newSeq[float32](numFreqBins * nMels)
   for i in 0 ..< numFreqBins:
-    result[i] = newSeq[float32](nMels)
     for j in 0 ..< nMels:
       let left = filterFreqs[j]
       let center = filterFreqs[j + 1]
       let right = filterFreqs[j + 2]
       let freq = fftFreqs[i]
       
+      var value: float32 = 0.0
       if freq >= left and freq <= center:
         if center != left:
-          result[i][j] = ((freq - left) / (center - left)).float32
+          value = ((freq - left) / (center - left)).float32
       elif freq > center and freq < right:
         if right != center:
-          result[i][j] = ((right - freq) / (right - center)).float32
+          value = ((right - freq) / (right - center)).float32
+      result[i * nMels + j] = value
 
 proc loadWavFile*(path: string): seq[float32] =
   ## Load WAV file, properly handling chunks
@@ -140,10 +142,10 @@ proc loadWavFile*(path: string): seq[float32] =
   file.setFilePos(dataOffset)
   let numSamples = dataSize div 2
   result = newSeq[float32](numSamples)
-  var buffer: array[1024, uint8]
+  var buffer: array[16384, uint8]  # 16KB buffer for better I/O throughput
   var sampleIdx = 0
   while sampleIdx < numSamples:
-    let toRead = min(1024, (numSamples - sampleIdx) * 2)
+    let toRead = min(16384, (numSamples - sampleIdx) * 2)
     let bytesRead = file.readBytes(buffer, 0, toRead)
     if bytesRead == 0:
       break
@@ -214,29 +216,29 @@ proc computeWhisperMelSpectrogram*(audio: seq[float32]): seq[float32] =
   let nFramesTotal = stft.len
   let nFreqBins = WHISPER_N_FFT div 2 + 1
   
-  # Compute power spectrogram: |x|^2
-  var powerSpec = newSeq[seq[float64]](nFreqBins)
+  # Compute power spectrogram: |x|^2 (flat array)
+  # powerSpec[freqIdx * nFramesTotal + frameIdx]
+  var powerSpec = newSeq[float64](nFreqBins * nFramesTotal)
   for f in 0 ..< nFreqBins:
-    powerSpec[f] = newSeq[float64](nFramesTotal)
     for t in 0 ..< nFramesTotal:
       let mag = abs(stft[t][f])
-      powerSpec[f][t] = (mag * mag).float64
+      powerSpec[f * nFramesTotal + t] = (mag * mag).float64
   
   # Apply mel filterbank
   let melFilter = createMelFilterbank(WHISPER_N_FFT, WHISPER_N_MELS, WHISPER_SAMPLE_RATE)
-  var melSpec = newSeq[seq[float64]](WHISPER_N_MELS)
+  # melSpec[melIdx * nFramesTotal + frameIdx]
+  var melSpec = newSeq[float64](WHISPER_N_MELS * nFramesTotal)
   for m in 0 ..< WHISPER_N_MELS:
-    melSpec[m] = newSeq[float64](nFramesTotal)
     for t in 0 ..< nFramesTotal:
       var sum: float64 = 0.0
       for f in 0 ..< nFreqBins:
-        sum += powerSpec[f][t] * melFilter[f][m].float64
-      melSpec[m][t] = max(sum, 1e-10)
+        sum += powerSpec[f * nFramesTotal + t] * melFilter[f * WHISPER_N_MELS + m].float64
+      melSpec[m * nFramesTotal + t] = max(sum, 1e-10)
   
   # log10
   for m in 0 ..< WHISPER_N_MELS:
     for t in 0 ..< nFramesTotal:
-      melSpec[m][t] = log10(melSpec[m][t])
+      melSpec[m * nFramesTotal + t] = log10(melSpec[m * nFramesTotal + t])
   
   # Discard last frame: log_spec[:, :-1]
   let nFrames = nFramesTotal - 1
@@ -245,12 +247,12 @@ proc computeWhisperMelSpectrogram*(audio: seq[float32]): seq[float32] =
   var globalMax = -1e300
   for m in 0 ..< WHISPER_N_MELS:
     for t in 0 ..< nFrames:
-      globalMax = max(globalMax, melSpec[m][t])
+      globalMax = max(globalMax, melSpec[m * nFramesTotal + t])
   
   result = newSeq[float32](WHISPER_N_MELS * nFrames)
   for m in 0 ..< WHISPER_N_MELS:
     for t in 0 ..< nFrames:
-      var val = max(melSpec[m][t], globalMax - 8.0)
+      var val = max(melSpec[m * nFramesTotal + t], globalMax - 8.0)
       val = (val + 4.0) / 4.0
       result[m * nFrames + t] = val.float32
 
@@ -260,6 +262,8 @@ proc computeWhisperMelSpectrogram*(audio: seq[float32]): seq[float32] =
 
 proc runEncoder*(whisper: WhisperModel, melSpectrogram: seq[float32]): OrtValue =
   ## Run Whisper encoder on mel spectrogram.
+  ## Returns encoder output as OrtValue that must be released by the caller
+  ## using `ReleaseValue()` when no longer needed to prevent memory leaks.
   var status: OrtStatusPtr
 
   var memoryInfo: OrtMemoryInfo

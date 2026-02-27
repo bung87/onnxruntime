@@ -465,7 +465,10 @@ proc checkStatus*(status: OrtStatusPtr) =
     ReleaseStatus(status)
     raise newException(Exception, msg)
 
+#------------------------------------------------------------------------------
 # Automatic resource management with destroy hooks
+#------------------------------------------------------------------------------
+
 proc `=destroy`*(info: OrtMemoryInfoObj) =
   ## Automatically release memory info when it goes out of scope
   let ptrInfo = cast[OrtMemoryInfo](addr info)

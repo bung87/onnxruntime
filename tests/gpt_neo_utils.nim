@@ -6,7 +6,7 @@ import onnxruntime
 import onnxruntime/onnxmodel
 
 # Re-export types needed by users of this module
-export InputTensor, OutputTensor, Model, OnnxNeoOutput
+export InputTensor, OutputTensor, Model, OnnxNeoOutput, batchSize, seqLen
 
 #------------------------------------------------------------------------------
 # GPT-Neo Model Inference
@@ -123,24 +123,8 @@ proc createEmptyPastKeyValues*(
     )
 
 #------------------------------------------------------------------------------
-# Shape and Data Access Helpers
+# Vocabulary Size Helper (GPT specific)
 #------------------------------------------------------------------------------
-
-proc batchSize*(tensor: OutputTensor): int64 =
-  ## Get the batch size from the output tensor shape.
-  ## Returns 0 if shape is empty.
-  if tensor.shape.len > 0:
-    result = tensor.shape[0]
-  else:
-    result = 0
-
-proc seqLen*(tensor: OutputTensor): int64 =
-  ## Get the sequence length from the output tensor shape.
-  ## Returns 0 if shape has fewer than 2 dimensions.
-  if tensor.shape.len > 1:
-    result = tensor.shape[1]
-  else:
-    result = 0
 
 proc vocabSize*(tensor: OutputTensor): int64 =
   ## Get the vocabulary size from the output tensor shape.
@@ -159,7 +143,7 @@ proc getLogitsForPosition*(tensor: OutputTensor, position: int): seq[float32] =
   ## Returns:
   ##   Logits vector for the specified position
   let vSize = tensor.vocabSize.int
-  let seqLength = tensor.seqLen.int
+  let seqLength = if tensor.shape.len > 1: tensor.shape[1].int else: 0
   if position < 0 or position >= seqLength:
     raise newException(IndexDefect, "Position " & $position & " out of range (0-" & $(seqLength-1) & ")")
   
@@ -174,7 +158,8 @@ proc getLastLogits*(tensor: OutputTensor): seq[float32] =
   ##
   ## Returns:
   ##   Logits vector for the last position
-  let lastPos = tensor.seqLen.int - 1
+  let seqLength = if tensor.shape.len > 1: tensor.shape[1].int else: 0
+  let lastPos = seqLength - 1
   if lastPos < 0:
     raise newException(IndexDefect, "Cannot get last logits from empty sequence")
   result = tensor.getLogitsForPosition(lastPos)

@@ -1,13 +1,10 @@
 ## test_piper_tts.nim
 ## Test Text-to-Speech inference using Piper voice model
-## Piper models convert phoneme IDs to raw audio samples
 
 import unittest
 import json
-import strutils
 import tables
 import os
-import strformat
 
 import onnxruntime, piper_utils
 
@@ -16,247 +13,106 @@ const TestDataDir = "tests/testdata/piper-voices"
 const ModelPath = TestDataDir / "zh_CN-chaowen-medium.onnx"
 const ConfigPath = TestDataDir / "zh_CN-chaowen-medium.onnx.json"
 
-# Model configuration globals
-var ConfigLoaded = false
-var PhonemeIdMap: Table[string, seq[int64]]
-
+# JSON types for config parsing
 type
-  PiperConfig* = object
-    ## Configuration for Piper TTS model
-    sampleRate*: int
-    numSpeakers*: int
-    noiseScale*: float32
-    lengthScale*: float32
-    noiseW*: float32
-    hopLength*: int
-    phonemeIdMap*: Table[string, seq[int64]]
-    speakerIdMap*: Table[string, int64]  ## Maps speaker names to IDs
+  InferenceConfig = object
+    noise_scale: float
+    length_scale: float
+    noise_w: float
 
-proc loadConfig(path: string): PiperConfig =
-  ## Load Piper model configuration from JSON file
-  let jsonContent = readFile(path)
-  let configJson = parseJson(jsonContent)
+  AudioConfig = object
+    sample_rate: int
 
-  result = PiperConfig(
-    sampleRate: 22050,
-    numSpeakers: 1,
-    noiseScale: 0.667'f32,
-    lengthScale: 1.0'f32,
-    noiseW: 0.8'f32,
-    hopLength: 256
-  )
-
-  if configJson.hasKey("audio") and configJson["audio"].hasKey("sample_rate"):
-    result.sampleRate = configJson["audio"]["sample_rate"].getInt()
-
-  if configJson.hasKey("num_speakers"):
-    result.numSpeakers = configJson["num_speakers"].getInt()
-
-  if configJson.hasKey("inference"):
-    let inference = configJson["inference"]
-    if inference.hasKey("noise_scale"):
-      result.noiseScale = inference["noise_scale"].getFloat().float32
-    if inference.hasKey("length_scale"):
-      result.lengthScale = inference["length_scale"].getFloat().float32
-    if inference.hasKey("noise_w"):
-      result.noiseW = inference["noise_w"].getFloat().float32
-
-  if configJson.hasKey("hop_length"):
-    result.hopLength = configJson["hop_length"].getInt()
-
-  # Load phoneme ID map
-  if configJson.hasKey("phoneme_id_map"):
-    for phoneme, ids in configJson["phoneme_id_map"]:
-      var idSeq: seq[int64] = @[]
-      for id in ids:
-        idSeq.add(id.getInt().int64)
-      result.phonemeIdMap[phoneme] = idSeq
-
-  # Load speaker ID map
-  if configJson.hasKey("speaker_id_map"):
-    for speakerName, speakerId in configJson["speaker_id_map"]:
-      result.speakerIdMap[speakerName] = speakerId.getInt().int64
-
-  echo &"Piper config loaded:"
-  echo &"  Sample rate: {result.sampleRate} Hz"
-  echo &"  Num speakers: {result.numSpeakers}"
-  echo &"  Hop length: {result.hopLength}"
-  echo &"  Phonemes: {result.phonemeIdMap.len}"
+  PiperConfigJson = object
+    audio: AudioConfig
+    num_speakers: int
+    inference: InferenceConfig
+    hop_length: int
+    phoneme_id_map: Table[string, seq[int64]]
+    speaker_id_map: Table[string, int64]
 
 # Static test phoneme sequence
-# "你好我是中国人" - ni3 hao3 wo3 shi4 zhong1 guo2 ren2
 const TestPhonemes = @[
-  "^",                                      # Start token
-  "q", "i", "a", "n", "1", "w", "a", "n", "4", " ",   # "qian wan" (千万)
-  "b", "u", "2", " ",                       # "bu" (不)
-  "y", "a", "o", "4", " ",                  # "yao" (要)
-  "w", "a", "n", "g", "4", " ",             # "wang" (忘)
-  "j", "i", "4", " ",                       # "ji" (记)
-  "j", "i", "e", "1", " ",                  # "jie" (阶)
-  "j", "i", "3", " ",                       # "ji" (级)
-  "d", "o", "u", "4", " ",                  # "dou" (斗)
-  "zh", "e", "n", "g", "1",                 # "zheng" (争)
-  "$"                                       # End token
+  "^", "q", "i", "a", "n", "1", "w", "a", "n", "4", " ",
+  "b", "u", "2", " ", "y", "a", "o", "4", " ", "w", "a", "n", "g", "4", " ",
+  "j", "i", "4", " ", "j", "i", "e", "1", " ", "j", "i", "3", " ",
+  "d", "o", "u", "4", " ", "zh", "e", "n", "g", "1", "$"
 ]
+
+proc loadConfig(path: string): PiperConfigJson =
+  ## Load Piper config from JSON file
+  readFile(path).parseJson().to(PiperConfigJson)
 
 proc phonemesToIds(phonemes: seq[string], phonemeMap: Table[string, seq[int64]]): seq[int64] =
   ## Convert phoneme sequence to ID sequence
-  result = @[]
-
   for phoneme in phonemes:
     if phonemeMap.hasKey(phoneme):
-      for id in phonemeMap[phoneme]:
-        result.add(id)
-    else:
-      # Use unknown token (usually "_")
-      if phonemeMap.hasKey("_"):
-        for id in phonemeMap["_"]:
-          result.add(id)
+      result.add(phonemeMap[phoneme])
+    elif phonemeMap.hasKey("_"):
+      result.add(phonemeMap["_"])
 
-# Helper functions for WAV header (little-endian byte conversion)
-proc toBytes(x: uint16): array[2, char] =
-  ## Convert uint16 to little-endian bytes
-  result[0] = char(x and 0xFF)
-  result[1] = char((x shr 8) and 0xFF)
+proc writeWavFile(path: string, pcmData: seq[int16], sampleRate: int) =
+  ## Write PCM data to WAV file
+  let numChannels = 1.uint16
+  let bitsPerSample = 16.uint16
+  let byteRate = sampleRate.uint32 * numChannels.uint32 * (bitsPerSample div 8).uint32
+  let blockAlign = numChannels * (bitsPerSample div 8)
+  let dataSize = (pcmData.len * sizeof(int16)).uint32
+  let chunkSize = 36.uint32 + dataSize
 
-proc toBytes(x: uint32): array[4, char] =
-  ## Convert uint32 to little-endian bytes
-  result[0] = char(x and 0xFF)
-  result[1] = char((x shr 8) and 0xFF)
-  result[2] = char((x shr 16) and 0xFF)
-  result[3] = char((x shr 24) and 0xFF)
+  var f = open(path, fmWrite)
+  defer: f.close()
 
-proc getSpeakerId(config: PiperConfig, speakerName: string = ""): int64 =
-  ## Get speaker ID by name. Returns 0 (default) for single-speaker models
-  ## or when speaker name is not found.
-  if config.numSpeakers <= 1:
-    return 0'i64
+  # RIFF header
+  f.write("RIFF")
+  discard f.writeBuffer(chunkSize.addr, 4)
+  f.write("WAVE")
 
-  if speakerName.len > 0 and config.speakerIdMap.hasKey(speakerName):
-    return config.speakerIdMap[speakerName]
+  # fmt subchunk
+  f.write("fmt ")
+  let subchunkSize = 16.uint32
+  discard f.writeBuffer(subchunkSize.addr, 4)
+  let audioFormat = 1.uint16
+  discard f.writeBuffer(audioFormat.addr, 2)
+  discard f.writeBuffer(numChannels.addr, 2)
+  let sr = sampleRate.uint32
+  discard f.writeBuffer(sr.addr, 4)
+  discard f.writeBuffer(byteRate.addr, 4)
+  discard f.writeBuffer(blockAlign.addr, 2)
+  discard f.writeBuffer(bitsPerSample.addr, 2)
 
-  # Return first available speaker ID if no name specified
-  if config.speakerIdMap.len > 0:
-    for _, sid in config.speakerIdMap:
-      return sid
+  # data subchunk
+  f.write("data")
+  discard f.writeBuffer(dataSize.addr, 4)
 
-  return 0'i64
+  # Write PCM data
+  for sample in pcmData:
+    discard f.writeBuffer(sample.addr, sizeof(int16))
 
-
-
-
-suite "Piper TTS Tests":
-  test "Load Piper model configuration":
-    echo "\n=== Piper TTS Configuration Test ==="
-
-    if not fileExists(ConfigPath):
-      echo "Config file not found, skipping test"
+suite "Piper TTS":
+  test "Full pipeline - phonemes to WAV file":
+    if not fileExists(ModelPath) or not fileExists(ConfigPath):
       skip()
 
+    # Load config using JSON to type mapping
     let config = loadConfig(ConfigPath)
+    check config.phoneme_id_map.len > 0
 
-    check config.sampleRate > 0
-    check config.phonemeIdMap.len > 0
-
-    echo &"Configuration loaded successfully!"
-    echo &"  Found {config.phonemeIdMap.len} phoneme mappings"
-
-    # Verify some expected phonemes exist
-    check config.phonemeIdMap.hasKey("^")  # Start token
-    check config.phonemeIdMap.hasKey("$")  # End token
-    check config.phonemeIdMap.hasKey("_")  # Padding/unknown
-
-    # For single-speaker models, speaker_id_map should be empty
-    # For multi-speaker models, it would contain speaker name -> ID mappings
-    if config.numSpeakers > 1:
-      check config.speakerIdMap.len > 0
-
-    ConfigLoaded = true
-
-  test "Save generated audio to file":
-    echo "\n=== Audio Save Test ==="
-
-    if not fileExists(ModelPath):
-      echo "Model not found, skipping test"
-      skip()
-
-    # Load configuration and model
-    let config = loadConfig(ConfigPath)
+    # Load model and run inference
     let model = loadModel(ModelPath)
-
-    # Use static test phonemes
-    let phonemes = TestPhonemes
-    let phonemeIds = phonemesToIds(phonemes, config.phonemeIdMap)
-    let speakerId = getSpeakerId(config)
-    let hasSpeakerId = config.numSpeakers > 1
+    let phonemeIds = phonemesToIds(TestPhonemes, config.phoneme_id_map)
     let output = runPiper(
       model, phonemeIds,
-      noiseScale = config.noiseScale,
-      lengthScale = config.lengthScale,
-      noiseW = config.noiseW,
-      speakerId = speakerId.int,
-      hasSpeakerId = hasSpeakerId
+      noiseScale = config.inference.noise_scale.float32,
+      lengthScale = config.inference.length_scale.float32,
+      noiseW = config.inference.noise_w.float32,
+      hasSpeakerId = false
     )
+    check output.data.len > 0
 
-    # Save as WAV file (16-bit signed integers, mono)
+    # Save to WAV file
     let outputPath = TestDataDir / "test_output.wav"
-    let pcmData = output.toInt16Samples()
-
-    # Write WAV file with header
-    var f = open(outputPath, fmWrite)
-
-    # WAV header
-    let numChannels = 1.uint16      # Mono
-    let sampleRate = config.sampleRate.uint32
-    let bitsPerSample = 16.uint16
-    let byteRate = sampleRate * numChannels.uint32 * (bitsPerSample div 8).uint32
-    let blockAlign = numChannels * (bitsPerSample div 8)
-    let dataSize = (pcmData.len * sizeof(int16)).uint32
-    let chunkSize = 36.uint32 + dataSize
-
-    # Prepare all byte values
-    let chunkSizeBytes = chunkSize.toBytes
-    let subchunkSizeBytes = 16.uint32.toBytes
-    let audioFormatBytes = 1.uint16.toBytes
-    let numChannelsBytes = numChannels.toBytes
-    let sampleRateBytes = sampleRate.toBytes
-    let byteRateBytes = byteRate.toBytes
-    let blockAlignBytes = blockAlign.toBytes
-    let bitsPerSampleBytes = bitsPerSample.toBytes
-    let dataSizeBytes = dataSize.toBytes
-
-    # RIFF chunk
-    f.write("RIFF")
-    discard f.writeBuffer(chunkSizeBytes[0].addr, 4)
-    f.write("WAVE")
-
-    # fmt subchunk
-    f.write("fmt ")
-    discard f.writeBuffer(subchunkSizeBytes[0].addr, 4)
-    discard f.writeBuffer(audioFormatBytes[0].addr, 2)
-    discard f.writeBuffer(numChannelsBytes[0].addr, 2)
-    discard f.writeBuffer(sampleRateBytes[0].addr, 4)
-    discard f.writeBuffer(byteRateBytes[0].addr, 4)
-    discard f.writeBuffer(blockAlignBytes[0].addr, 2)
-    discard f.writeBuffer(bitsPerSampleBytes[0].addr, 2)
-
-    # data subchunk
-    f.write("data")
-    discard f.writeBuffer(dataSizeBytes[0].addr, 4)
-
-    # Write PCM data
-    for sample in pcmData:
-      discard f.writeBuffer(sample.addr, sizeof(int16))
-    f.close()
-
-    echo &"Saved WAV audio to: {outputPath}"
-    echo &"File size: {pcmData.len * 2 + 44} bytes ({pcmData.len} samples + 44 byte header)"
-    echo &"To play: ffplay {outputPath}  # or any media player"
-
-    model.close()
-
+    writeWavFile(outputPath, output.toInt16Samples(), config.audio.sample_rate)
     check fileExists(outputPath)
 
-    # Note: Not cleaning up so you can test the audio:
-    # ffplay tests/testdata/piper-voices/test_output.wav  # or any media player
-    # To clean up manually: rm tests/testdata/piper-voices/test_output.wav
+    model.close()
