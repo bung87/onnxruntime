@@ -8,7 +8,7 @@ static int ort_init(void) {
     if (!g_ort) {
         const OrtApiBase* base = OrtGetApiBase();
         if (!base) return -1;
-        g_ort = base->GetApi(24);  /* ORT_API_VERSION */
+        g_ort = base->GetApi(ORT_API_VERSION);
     }
     return g_ort ? 0 : -1;
 }

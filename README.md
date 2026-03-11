@@ -19,6 +19,26 @@ sudo cp onnxruntime-linux-x64-1.16.3/lib/libonnxruntime.so* /usr/local/lib/
 sudo ldconfig
 ```
 
+## Compilation Flags
+
+| Flag | Description | Example |
+|------|-------------|---------|
+| `-d:ortPath=PATH` | Set ONNX Runtime installation path (auto-adds `include/` and `lib/` subpaths) | `-d:ortPath=/opt/onnxruntime` |
+| `-d:OrtApiVersion=N` | Set ONNX Runtime API version (default: 24) | `-d:OrtApiVersion=20` |
+
+### Examples
+
+```bash
+# Use system default paths
+nim c your_app.nim
+
+# Use custom ONNX Runtime installation path
+nim c -d:ortPath=/opt/onnxruntime your_app.nim
+
+# Use custom API version (if your ONNX Runtime version differs)
+nim c -d:ortPath=/opt/onnxruntime -d:OrtApiVersion=20 your_app.nim
+```
+
 ## Quick Start
 
 ```nim

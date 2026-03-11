@@ -11,8 +11,12 @@
 import std/os
 
 const
-  OrtApiVersion* = 24
+  OrtApiVersion* {.intdefine.} = 24
 
+# Pass API version to C wrapper
+{.passC: "-DORT_API_VERSION=" & $OrtApiVersion.}
+
+const
   # Platform-specific library names
   OrtLibName* = when defined(macosx): "libonnxruntime.dylib"
                 elif defined(windows): "onnxruntime.dll"
