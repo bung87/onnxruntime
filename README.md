@@ -183,3 +183,21 @@ tests/testdata/url-title-classifier
 ├── tokenizer.json
 └── tokenizer_config.json
 ```
+
+TTS example: download model via `scritps/download_vits-icefall-zh-aishell3.sh`
+
+below are the files you need to download:
+
+```bash
+tests/testdata/vits-icefall-zh-aishell3
+├── date.fst
+├── lexicon.txt
+├── model.onnx
+├── new_heteronym.fst
+├── number.fst
+├── phone.fst
+├── rule.far
+├── speakers.txt
+├── test_output.wav
+└── tokens.txt
+```
