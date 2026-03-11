@@ -1,70 +1,59 @@
 ## ort_bindings.nim
 ## Low-level Nim bindings for ONNX Runtime C API
 ##
-## Installation:
-##   macOS: brew install onnxruntime
-##   Linux: Download from https://github.com/microsoft/onnxruntime/releases
+## Path configuration:
+##   -d:ortPath=PATH      - Set ONNX Runtime installation path (auto-adds include/ and lib/)
 ##
-## Custom path (optional):
-##   Set ONNXRUNTIME_PATH environment variable at compile time:
-##   nim c -d:ONNXRUNTIME_PATH=/path/to/onnxruntime your_app.nim
+## Examples:
+##   nim c your_app.nim                              # Use system default paths
+##   nim c -d:ortPath=/opt/onnxruntime your_app.nim  # Use custom installation path
 
-import std/[os, strutils]
+import std/os
 
 const
-  ORT_API_VERSION* = 24
+  OrtApiVersion* = 24
 
-# Detect ONNX Runtime installation path at compile time
-# Priority: compile-time define > environment variable > auto-detect
-const OnnxRuntimePath = block:
-  var path = ""
-  when defined(ONNXRUNTIME_PATH):
-    path = staticExec("echo " & $ONNXRUNTIME_PATH)
+  # Platform-specific library names
+  OrtLibName* = when defined(macosx): "libonnxruntime.dylib"
+                elif defined(windows): "onnxruntime.dll"
+                else: "libonnxruntime.so"
+
+  # Optional ONNX Runtime installation path
+  OrtPath {.strdefine.} = ""
+
+
+when OrtPath != "":
+  const base = OrtPath
+  const inc = base / "include"
+  const lib = base / "lib"
+
+  {.passC: "-I" & inc.}
+  {.passL: "-L" & lib.}
+
+  when defined(windows):
+    {.passL: "onnxruntime.lib".}
   else:
-    let envPath = strip(staticExec("echo $ONNXRUNTIME_PATH 2>/dev/null || echo ''"))
-    if envPath != "" and dirExists(envPath):
-      path = envPath
-    else:
-      when defined(macosx):
-        let brewPrefix = strip(staticExec("brew --prefix onnxruntime 2>/dev/null || echo ''"))
-        if brewPrefix != "":
-          path = brewPrefix
-        else:
-          for p in ["/opt/homebrew/opt/onnxruntime", "/usr/local/opt/onnxruntime"]:
-            if dirExists(p):
-              path = p
-              break
-      elif defined(linux):
-        for p in ["/usr/local", "/usr", "/opt/onnxruntime"]:
-          if fileExists(p / "lib/libonnxruntime.so") or dirExists(p / "include/onnxruntime"):
-            path = p
-            break
-  path
+    {.passL: "-lonnxruntime".}
 
-# Platform-specific library path
-when defined(macosx):
-  const OrtLibName* = 
-    when OnnxRuntimePath != "": OnnxRuntimePath / "lib/libonnxruntime.dylib"
-    else: "libonnxruntime.dylib"
-elif defined(windows):
-  const OrtLibName* = "onnxruntime.dll"
 else:
-  const OrtLibName* = 
-    when OnnxRuntimePath != "": OnnxRuntimePath / "lib/libonnxruntime.so"
-    else: "libonnxruntime.so"
+  when defined(macosx):
+    const prefix = gorge("brew --prefix onnxruntime")
+    const inc = prefix / "include"
+    const lib = prefix / "lib"
 
-# Pass include path to C compiler and library path to linker
-when OnnxRuntimePath != "":
-  {.passC: "-I" & OnnxRuntimePath / "include".}
-  {.passL: "-L" & OnnxRuntimePath / "lib".}
+    {.passC: "-I" & inc.}
+    {.passL: "-L" & lib.}
+    {.passL: "-lonnxruntime".}
+    {.passL: "-Wl,-rpath," & lib.}
 
-# Link against onnxruntime library
-when defined(macosx):
-  {.passL: "-lonnxruntime".}
-elif defined(linux):
-  {.passL: "-lonnxruntime".}
-elif defined(windows):
-  {.passL: "onnxruntime.lib".}
+  elif defined(linux):
+    {.passL: "-lonnxruntime".}
+
+  elif defined(windows):
+    {.passL: "onnxruntime.lib".}
+
+{.compile: "ort_wrapper.c".}
+
 
 {.push, header: "<onnxruntime/onnxruntime_c_api.h>", cdecl.}
 
@@ -135,434 +124,122 @@ type
     OrtMemTypeCPUOutput = -1
     OrtMemTypeDefault = 0
 
-  # Opaque types
+  # Opaque handle types
   OrtEnvObj = object
   OrtEnv* = ptr OrtEnvObj
-  
+
   OrtStatusObj = object
   OrtStatus* = ptr OrtStatusObj
   OrtStatusPtr* = OrtStatus
-  
+
   OrtMemoryInfoObj = object
   OrtMemoryInfo* = ptr OrtMemoryInfoObj
-  
+
   OrtSessionObj = object
   OrtSession* = ptr OrtSessionObj
-  
+
   OrtValueObj = object
   OrtValue* = ptr OrtValueObj
-  
+
   OrtRunOptionsObj = object
   OrtRunOptions* = ptr OrtRunOptionsObj
-  
+
   OrtTypeInfoObj = object
   OrtTypeInfo* = ptr OrtTypeInfoObj
-  
+
   OrtTensorTypeAndShapeInfoObj = object
   OrtTensorTypeAndShapeInfo* = ptr OrtTensorTypeAndShapeInfoObj
-  
+
   OrtSessionOptionsObj = object
   OrtSessionOptions* = ptr OrtSessionOptionsObj
-  
+
   OrtAllocatorObj = object
   OrtAllocator* = ptr OrtAllocatorObj
 
 {.pop.}
 
-# Use emit to create a C wrapper that handles all the API details
-{.emit: """
-#include <onnxruntime/onnxruntime_c_api.h>
-#include <stdlib.h>
 
-static const OrtApi* g_ort_api = NULL;
+proc GetErrorMessage*(status: OrtStatusPtr): cstring {.importc: "ort_GetErrorMessage", cdecl.}
+proc ReleaseStatus*(status: OrtStatusPtr) {.importc: "ort_ReleaseStatus", cdecl.}
 
-static int ensure_api_initialized(void) {
-    if (g_ort_api == NULL) {
-        const OrtApiBase* base = OrtGetApiBase();
-        if (base == NULL) return -1;
-        g_ort_api = base->GetApi(24);  // ORT_API_VERSION
-    }
-    return (g_ort_api != NULL) ? 0 : -1;
-}
+proc CreateEnv*(log_severity_level: OrtLoggingLevel, logid: cstring, outs: ptr OrtEnv): OrtStatusPtr {.importc: "ort_CreateEnv", cdecl.}
+proc ReleaseEnv*(env: OrtEnv) {.importc: "ort_ReleaseEnv", cdecl.}
 
-// Status wrappers
-const char* ort_GetErrorMessage(OrtStatus* status) {
-    if (!g_ort_api) return NULL;
-    return g_ort_api->GetErrorMessage(status);
-}
+proc CreateSession*(env: OrtEnv, model_path: cstring, options: OrtSessionOptions, outs: ptr OrtSession): OrtStatusPtr {.importc: "ort_CreateSession", cdecl.}
+proc ReleaseSession*(session: OrtSession) {.importc: "ort_ReleaseSession", cdecl.}
+proc Run*(session: OrtSession, run_options: OrtRunOptions, input_names: ptr cstring, inputs: ptr OrtValue, input_len: csize_t, output_names: ptr cstring, output_names_len: csize_t, outputs: ptr OrtValue): OrtStatusPtr {.importc: "ort_Run", cdecl.}
 
-void ort_ReleaseStatus(OrtStatus* status) {
-    if (!g_ort_api) return;
-    g_ort_api->ReleaseStatus(status);
-}
+proc CreateSessionOptions*(options: ptr OrtSessionOptions): OrtStatusPtr {.importc: "ort_CreateSessionOptions", cdecl.}
+proc ReleaseSessionOptions*(options: OrtSessionOptions) {.importc: "ort_ReleaseSessionOptions", cdecl.}
+proc EnableCpuMemArena*(options: OrtSessionOptions): OrtStatusPtr {.importc: "ort_EnableCpuMemArena", cdecl.}
+proc SessionOptionsAppendExecutionProvider_CUDA*(options: OrtSessionOptions, device_id: cint): OrtStatusPtr {.importc: "ort_SessionOptionsAppendExecutionProvider_CUDA", cdecl.}
+proc SessionOptionsAppendExecutionProvider_CoreML*(options: OrtSessionOptions): OrtStatusPtr {.importc: "ort_SessionOptionsAppendExecutionProvider_CoreML", cdecl.}
 
-// Environment wrappers
-OrtStatus* ort_CreateEnv(OrtLoggingLevel log_level, const char* logid, OrtEnv** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->CreateEnv(log_level, logid, out);
-}
+proc CreateCpuMemoryInfo*(`type`: OrtAllocatorType, mem_type: OrtMemType, outs: ptr OrtMemoryInfo): OrtStatusPtr {.importc: "ort_CreateCpuMemoryInfo", cdecl.}
+proc ReleaseMemoryInfo*(info: OrtMemoryInfo) {.importc: "ort_ReleaseMemoryInfo", cdecl.}
 
-void ort_ReleaseEnv(OrtEnv* env) {
-    if (!g_ort_api || !env) return;
-    g_ort_api->ReleaseEnv(env);
-}
+proc GetAllocatorWithDefaultOptions*(outs: ptr OrtAllocator): OrtStatusPtr {.importc: "ort_GetAllocatorWithDefaultOptions", cdecl.}
+proc ReleaseAllocator*(allocator: OrtAllocator) {.importc: "ort_ReleaseAllocator", cdecl.}
 
-// Session wrappers
-OrtStatus* ort_CreateSession(OrtEnv* env, const char* model_path, OrtSessionOptions* options, OrtSession** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->CreateSession(env, model_path, options, out);
-}
+proc CreateTensorWithDataAsOrtValue*(info: OrtMemoryInfo, p_data: pointer, p_data_len: csize_t, shape: ptr int64, shape_len: csize_t, `type`: ONNXTensorElementDataType, outs: ptr OrtValue): OrtStatusPtr {.importc: "ort_CreateTensorWithDataAsOrtValue", cdecl.}
+proc ReleaseValue*(value: OrtValue) {.importc: "ort_ReleaseValue", cdecl.}
+proc GetTensorMutableData*(value: OrtValue, outs: ptr pointer): OrtStatusPtr {.importc: "ort_GetTensorMutableData", cdecl.}
+proc GetTensorTypeAndShape*(value: OrtValue, outs: ptr OrtTensorTypeAndShapeInfo): OrtStatusPtr {.importc: "ort_GetTensorTypeAndShape", cdecl.}
 
-void ort_ReleaseSession(OrtSession* session) {
-    if (!g_ort_api || !session) return;
-    g_ort_api->ReleaseSession(session);
-}
+proc GetTypeInfo*(value: OrtValue, outs: ptr OrtTypeInfo): OrtStatusPtr {.importc: "ort_GetTypeInfo", cdecl.}
+proc ReleaseTypeInfo*(type_info: OrtTypeInfo) {.importc: "ort_ReleaseTypeInfo", cdecl.}
+proc CastTypeInfoToTensorInfo*(type_info: OrtTypeInfo, outs: ptr OrtTensorTypeAndShapeInfo): OrtStatusPtr {.importc: "ort_CastTypeInfoToTensorInfo", cdecl.}
+proc ReleaseTensorTypeAndShapeInfo*(info: OrtTensorTypeAndShapeInfo) {.importc: "ort_ReleaseTensorTypeAndShapeInfo", cdecl.}
+proc GetDimensionsCount*(info: OrtTensorTypeAndShapeInfo, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_GetDimensionsCount", cdecl.}
+proc GetDimensions*(info: OrtTensorTypeAndShapeInfo, dim_values: ptr int64, dim_values_length: csize_t): OrtStatusPtr {.importc: "ort_GetDimensions", cdecl.}
+proc GetTensorShapeElementCount*(info: OrtTensorTypeAndShapeInfo, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_GetTensorShapeElementCount", cdecl.}
 
-OrtStatus* ort_Run(OrtSession* session, OrtRunOptions* run_options,
-                   const char* const* input_names, const OrtValue* const* inputs, size_t input_len,
-                   const char* const* output_names, size_t output_names_len, OrtValue** outputs) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->Run(session, run_options, input_names, inputs, input_len, 
-                          output_names, output_names_len, outputs);
-}
+proc SessionGetInputCount*(session: OrtSession, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_SessionGetInputCount", cdecl.}
+proc SessionGetOutputCount*(session: OrtSession, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_SessionGetOutputCount", cdecl.}
+proc SessionGetInputName*(session: OrtSession, index: csize_t, allocator: OrtAllocator, outs: ptr cstring): OrtStatusPtr {.importc: "ort_SessionGetInputName", cdecl.}
+proc SessionGetOutputName*(session: OrtSession, index: csize_t, allocator: OrtAllocator, outs: ptr cstring): OrtStatusPtr {.importc: "ort_SessionGetOutputName", cdecl.}
+proc SessionGetInputTypeInfo*(session: OrtSession, index: csize_t, outs: ptr OrtTypeInfo): OrtStatusPtr {.importc: "ort_SessionGetInputTypeInfo", cdecl.}
+proc SessionGetOutputTypeInfo*(session: OrtSession, index: csize_t, outs: ptr OrtTypeInfo): OrtStatusPtr {.importc: "ort_SessionGetOutputTypeInfo", cdecl.}
 
-// SessionOptions wrappers
-OrtStatus* ort_CreateSessionOptions(OrtSessionOptions** options) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->CreateSessionOptions(options);
-}
 
-void ort_ReleaseSessionOptions(OrtSessionOptions* options) {
-    if (!g_ort_api || !options) return;
-    g_ort_api->ReleaseSessionOptions(options);
-}
-
-OrtStatus* ort_EnableCpuMemArena(OrtSessionOptions* options) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->EnableCpuMemArena(options);
-}
-
-// GPU support (CUDA and CoreML)
-OrtStatus* ort_SessionOptionsAppendExecutionProvider_CUDA(OrtSessionOptions* options, int device_id) {
-    if (ensure_api_initialized() != 0) return NULL;
-    // Note: CUDA support requires ONNX Runtime built with CUDA
-    // For simplicity, we'll return NULL to indicate CUDA is not available
-    // This allows the code to compile and run on CPU
-    return NULL;
-}
-
-OrtStatus* ort_SessionOptionsAppendExecutionProvider_CoreML(OrtSessionOptions* options) {
-    if (ensure_api_initialized() != 0) return NULL;
-    // Use the generic execution provider API to add CoreML
-    // CoreML is the GPU acceleration provider for macOS/iOS
-    const char* provider_name = "CoreML";
-    const char** keys = NULL;
-    const char** values = NULL;
-    size_t num_keys = 0;
-    return g_ort_api->SessionOptionsAppendExecutionProvider(options, provider_name, keys, values, num_keys);
-}
-
-// MemoryInfo wrappers
-OrtStatus* ort_CreateCpuMemoryInfo(OrtAllocatorType type, OrtMemType mem_type, OrtMemoryInfo** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->CreateCpuMemoryInfo(type, mem_type, out);
-}
-
-void ort_ReleaseMemoryInfo(OrtMemoryInfo* info) {
-    if (!g_ort_api || !info) return;
-    g_ort_api->ReleaseMemoryInfo(info);
-}
-
-// Allocator wrappers
-OrtStatus* ort_GetAllocatorWithDefaultOptions(OrtAllocator** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetAllocatorWithDefaultOptions(out);
-}
-
-void ort_ReleaseAllocator(OrtAllocator* allocator) {
-    if (!g_ort_api || !allocator) return;
-    g_ort_api->ReleaseAllocator(allocator);
-}
-
-// Tensor wrappers
-OrtStatus* ort_CreateTensorWithDataAsOrtValue(OrtMemoryInfo* info, void* p_data, size_t p_data_len,
-                                               int64_t* shape, size_t shape_len,
-                                               ONNXTensorElementDataType type, OrtValue** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->CreateTensorWithDataAsOrtValue(info, p_data, p_data_len, shape, shape_len, 
-                                                      type, out);
-}
-
-void ort_ReleaseValue(OrtValue* value) {
-    if (!g_ort_api || !value) return;
-    g_ort_api->ReleaseValue(value);
-}
-
-OrtStatus* ort_GetTensorMutableData(OrtValue* value, void** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetTensorMutableData(value, out);
-}
-
-OrtStatus* ort_GetTensorTypeAndShape(OrtValue* value, OrtTensorTypeAndShapeInfo** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetTensorTypeAndShape(value, out);
-}
-
-// TypeInfo wrappers
-OrtStatus* ort_GetTypeInfo(OrtValue* value, OrtTypeInfo** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetTypeInfo(value, out);
-}
-
-void ort_ReleaseTypeInfo(OrtTypeInfo* type_info) {
-    if (!g_ort_api || !type_info) return;
-    g_ort_api->ReleaseTypeInfo(type_info);
-}
-
-OrtStatus* ort_CastTypeInfoToTensorInfo(OrtTypeInfo* type_info, OrtTensorTypeAndShapeInfo** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->CastTypeInfoToTensorInfo(type_info, out);
-}
-
-// TensorTypeAndShapeInfo wrappers
-void ort_ReleaseTensorTypeAndShapeInfo(OrtTensorTypeAndShapeInfo* info) {
-    if (!g_ort_api || !info) return;
-    g_ort_api->ReleaseTensorTypeAndShapeInfo(info);
-}
-
-OrtStatus* ort_GetDimensionsCount(OrtTensorTypeAndShapeInfo* info, size_t* out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetDimensionsCount(info, out);
-}
-
-OrtStatus* ort_GetDimensions(OrtTensorTypeAndShapeInfo* info, int64_t* dim_values, size_t dim_values_length) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetDimensions(info, dim_values, dim_values_length);
-}
-
-OrtStatus* ort_GetTensorShapeElementCount(OrtTensorTypeAndShapeInfo* info, size_t* out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->GetTensorShapeElementCount(info, out);
-}
-
-// Session introspection wrappers
-OrtStatus* ort_SessionGetInputCount(OrtSession* session, size_t* out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->SessionGetInputCount(session, out);
-}
-
-OrtStatus* ort_SessionGetOutputCount(OrtSession* session, size_t* out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->SessionGetOutputCount(session, out);
-}
-
-OrtStatus* ort_SessionGetInputName(OrtSession* session, size_t index, OrtAllocator* allocator, char** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->SessionGetInputName(session, index, allocator, out);
-}
-
-OrtStatus* ort_SessionGetOutputName(OrtSession* session, size_t index, OrtAllocator* allocator, char** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->SessionGetOutputName(session, index, allocator, out);
-}
-
-OrtStatus* ort_SessionGetInputTypeInfo(OrtSession* session, size_t index, OrtTypeInfo** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->SessionGetInputTypeInfo(session, index, out);
-}
-
-OrtStatus* ort_SessionGetOutputTypeInfo(OrtSession* session, size_t index, OrtTypeInfo** out) {
-    if (ensure_api_initialized() != 0) return NULL;
-    return g_ort_api->SessionGetOutputTypeInfo(session, index, out);
-}
-""".}
-
-# Import the C wrapper functions
-proc ort_GetErrorMessage*(status: OrtStatusPtr): cstring {.importc: "ort_GetErrorMessage", nodecl.}
-proc ort_ReleaseStatus*(status: OrtStatusPtr) {.importc: "ort_ReleaseStatus", nodecl.}
-proc ort_CreateEnv*(log_level: OrtLoggingLevel, logid: cstring, outs: ptr OrtEnv): OrtStatusPtr {.importc: "ort_CreateEnv", nodecl.}
-proc ort_ReleaseEnv*(env: OrtEnv) {.importc: "ort_ReleaseEnv", nodecl.}
-proc ort_CreateSession*(env: OrtEnv, model_path: cstring, options: OrtSessionOptions, outs: ptr OrtSession): OrtStatusPtr {.importc: "ort_CreateSession", nodecl.}
-proc ort_ReleaseSession*(session: OrtSession) {.importc: "ort_ReleaseSession", nodecl.}
-proc ort_Run*(session: OrtSession, run_options: OrtRunOptions, input_names: ptr cstring, inputs: ptr OrtValue, input_len: csize_t, output_names: ptr cstring, output_names_len: csize_t, outputs: ptr OrtValue): OrtStatusPtr {.importc: "ort_Run", nodecl.}
-proc ort_CreateSessionOptions*(options: ptr OrtSessionOptions): OrtStatusPtr {.importc: "ort_CreateSessionOptions", nodecl.}
-proc ort_ReleaseSessionOptions*(options: OrtSessionOptions) {.importc: "ort_ReleaseSessionOptions", nodecl.}
-proc ort_EnableCpuMemArena*(options: OrtSessionOptions): OrtStatusPtr {.importc: "ort_EnableCpuMemArena", nodecl.}
-proc ort_SessionOptionsAppendExecutionProvider_CUDA*(options: OrtSessionOptions, device_id: cint): OrtStatusPtr {.importc: "ort_SessionOptionsAppendExecutionProvider_CUDA", nodecl.}
-proc ort_SessionOptionsAppendExecutionProvider_CoreML*(options: OrtSessionOptions): OrtStatusPtr {.importc: "ort_SessionOptionsAppendExecutionProvider_CoreML", nodecl.}
-proc ort_CreateCpuMemoryInfo*(`type`: OrtAllocatorType, mem_type: OrtMemType, outs: ptr OrtMemoryInfo): OrtStatusPtr {.importc: "ort_CreateCpuMemoryInfo", nodecl.}
-proc ort_ReleaseMemoryInfo*(info: OrtMemoryInfo) {.importc: "ort_ReleaseMemoryInfo", nodecl.}
-proc ort_CreateTensorWithDataAsOrtValue*(info: OrtMemoryInfo, p_data: pointer, p_data_len: csize_t, shape: ptr int64, shape_len: csize_t, `type`: ONNXTensorElementDataType, outs: ptr OrtValue): OrtStatusPtr {.importc: "ort_CreateTensorWithDataAsOrtValue", nodecl.}
-proc ort_ReleaseValue*(value: OrtValue) {.importc: "ort_ReleaseValue", nodecl.}
-proc ort_GetTensorMutableData*(value: OrtValue, outs: ptr pointer): OrtStatusPtr {.importc: "ort_GetTensorMutableData", nodecl.}
-proc ort_GetTensorTypeAndShape*(value: OrtValue, outs: ptr OrtTensorTypeAndShapeInfo): OrtStatusPtr {.importc: "ort_GetTensorTypeAndShape", nodecl.}
-proc ort_GetTypeInfo*(value: OrtValue, outs: ptr OrtTypeInfo): OrtStatusPtr {.importc: "ort_GetTypeInfo", nodecl.}
-proc ort_ReleaseTypeInfo*(type_info: OrtTypeInfo) {.importc: "ort_ReleaseTypeInfo", nodecl.}
-proc ort_CastTypeInfoToTensorInfo*(type_info: OrtTypeInfo, outs: ptr OrtTensorTypeAndShapeInfo): OrtStatusPtr {.importc: "ort_CastTypeInfoToTensorInfo", nodecl.}
-proc ort_ReleaseTensorTypeAndShapeInfo*(info: OrtTensorTypeAndShapeInfo) {.importc: "ort_ReleaseTensorTypeAndShapeInfo", nodecl.}
-proc ort_GetDimensionsCount*(info: OrtTensorTypeAndShapeInfo, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_GetDimensionsCount", nodecl.}
-proc ort_GetDimensions*(info: OrtTensorTypeAndShapeInfo, dim_values: ptr int64, dim_values_length: csize_t): OrtStatusPtr {.importc: "ort_GetDimensions", nodecl.}
-proc ort_GetTensorShapeElementCount*(info: OrtTensorTypeAndShapeInfo, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_GetTensorShapeElementCount", nodecl.}
-proc ort_GetAllocatorWithDefaultOptions*(outs: ptr OrtAllocator): OrtStatusPtr {.importc: "ort_GetAllocatorWithDefaultOptions", nodecl.}
-proc ort_ReleaseAllocator*(allocator: OrtAllocator) {.importc: "ort_ReleaseAllocator", nodecl.}
-proc ort_SessionGetInputCount*(session: OrtSession, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_SessionGetInputCount", nodecl.}
-proc ort_SessionGetOutputCount*(session: OrtSession, outs: ptr csize_t): OrtStatusPtr {.importc: "ort_SessionGetOutputCount", nodecl.}
-proc ort_SessionGetInputName*(session: OrtSession, index: csize_t, allocator: OrtAllocator, outs: ptr cstring): OrtStatusPtr {.importc: "ort_SessionGetInputName", nodecl.}
-proc ort_SessionGetOutputName*(session: OrtSession, index: csize_t, allocator: OrtAllocator, outs: ptr cstring): OrtStatusPtr {.importc: "ort_SessionGetOutputName", nodecl.}
-proc ort_SessionGetInputTypeInfo*(session: OrtSession, index: csize_t, outs: ptr OrtTypeInfo): OrtStatusPtr {.importc: "ort_SessionGetInputTypeInfo", nodecl.}
-proc ort_SessionGetOutputTypeInfo*(session: OrtSession, index: csize_t, outs: ptr OrtTypeInfo): OrtStatusPtr {.importc: "ort_SessionGetOutputTypeInfo", nodecl.}
-
-# Nim-friendly wrappers (same names as before, but calling the C wrappers)
-proc CreateEnv*(log_severity_level: OrtLoggingLevel, logid: cstring, outs: ptr OrtEnv): OrtStatusPtr =
-  ort_CreateEnv(log_severity_level, logid, outs)
-
-proc ReleaseEnv*(env: OrtEnv) = ort_ReleaseEnv(env)
-
-proc CreateSession*(env: OrtEnv, model_path: cstring, options: OrtSessionOptions, outs: ptr OrtSession): OrtStatusPtr =
-  ort_CreateSession(env, model_path, options, outs)
-
-proc ReleaseSession*(session: OrtSession) = ort_ReleaseSession(session)
-
-proc Run*(session: OrtSession, run_options: OrtRunOptions,
-          input_names: ptr cstring, inputs: ptr OrtValue, input_len: csize_t,
-          output_names: ptr cstring, output_names_len: csize_t,
-          outputs: ptr OrtValue): OrtStatusPtr =
-  ort_Run(session, run_options, input_names, inputs, input_len, 
-          output_names, output_names_len, outputs)
-
-proc CreateSessionOptions*(options: ptr OrtSessionOptions): OrtStatusPtr =
-  ort_CreateSessionOptions(options)
-
-proc ReleaseSessionOptions*(options: OrtSessionOptions) = ort_ReleaseSessionOptions(options)
-
-proc EnableCpuMemArena*(options: OrtSessionOptions): OrtStatusPtr =
-  ort_EnableCpuMemArena(options)
-
-# GPU support (CUDA and CoreML)
-proc SessionOptionsAppendExecutionProvider_CUDA*(options: OrtSessionOptions, device_id: cint): OrtStatusPtr =
-  ort_SessionOptionsAppendExecutionProvider_CUDA(options, device_id)
-
-proc SessionOptionsAppendExecutionProvider_CoreML*(options: OrtSessionOptions): OrtStatusPtr =
-  ort_SessionOptionsAppendExecutionProvider_CoreML(options)
-
-# MemoryInfo APIs
-proc CreateCpuMemoryInfo*(`type`: OrtAllocatorType, mem_type: OrtMemType, outs: ptr OrtMemoryInfo): OrtStatusPtr =
-  ort_CreateCpuMemoryInfo(`type`, mem_type, outs)
-
-proc ReleaseMemoryInfo*(info: OrtMemoryInfo) = ort_ReleaseMemoryInfo(info)
-
-proc GetAllocatorWithDefaultOptions*(outs: ptr OrtAllocator): OrtStatusPtr =
-  ort_GetAllocatorWithDefaultOptions(outs)
-
-proc ReleaseAllocator*(allocator: OrtAllocator) =
-  ort_ReleaseAllocator(allocator)
-
-# Session introspection APIs
-proc SessionGetInputCount*(session: OrtSession, outs: ptr csize_t): OrtStatusPtr =
-  ort_SessionGetInputCount(session, outs)
-
-proc SessionGetOutputCount*(session: OrtSession, outs: ptr csize_t): OrtStatusPtr =
-  ort_SessionGetOutputCount(session, outs)
-
-proc SessionGetInputName*(session: OrtSession, index: csize_t, allocator: OrtAllocator, outs: ptr cstring): OrtStatusPtr =
-  ort_SessionGetInputName(session, index, allocator, outs)
-
-proc SessionGetOutputName*(session: OrtSession, index: csize_t, allocator: OrtAllocator, outs: ptr cstring): OrtStatusPtr =
-  ort_SessionGetOutputName(session, index, allocator, outs)
-
-proc SessionGetInputTypeInfo*(session: OrtSession, index: csize_t, outs: ptr OrtTypeInfo): OrtStatusPtr =
-  ort_SessionGetInputTypeInfo(session, index, outs)
-
-proc SessionGetOutputTypeInfo*(session: OrtSession, index: csize_t, outs: ptr OrtTypeInfo): OrtStatusPtr =
-  ort_SessionGetOutputTypeInfo(session, index, outs)
-
-proc CreateTensorWithDataAsOrtValue*(info: OrtMemoryInfo, p_data: pointer, p_data_len: csize_t,
-                                     shape: ptr int64, shape_len: csize_t,
-                                     `type`: ONNXTensorElementDataType, outs: ptr OrtValue): OrtStatusPtr =
-  ort_CreateTensorWithDataAsOrtValue(info, p_data, p_data_len, shape, shape_len, `type`, outs)
-
-proc ReleaseValue*(value: OrtValue) = ort_ReleaseValue(value)
-
-proc GetTensorMutableData*(value: OrtValue, outs: ptr pointer): OrtStatusPtr =
-  ort_GetTensorMutableData(value, outs)
-
-proc GetTensorTypeAndShape*(value: OrtValue, outs: ptr OrtTensorTypeAndShapeInfo): OrtStatusPtr =
-  ort_GetTensorTypeAndShape(value, outs)
-
-proc GetTypeInfo*(value: OrtValue, outs: ptr OrtTypeInfo): OrtStatusPtr =
-  ort_GetTypeInfo(value, outs)
-
-proc ReleaseTypeInfo*(type_info: OrtTypeInfo) = ort_ReleaseTypeInfo(type_info)
-
-proc CastTypeInfoToTensorInfo*(type_info: OrtTypeInfo, outs: ptr OrtTensorTypeAndShapeInfo): OrtStatusPtr =
-  ort_CastTypeInfoToTensorInfo(type_info, outs)
-
-proc ReleaseTensorTypeAndShapeInfo*(info: OrtTensorTypeAndShapeInfo) = ort_ReleaseTensorTypeAndShapeInfo(info)
-
-proc GetDimensionsCount*(info: OrtTensorTypeAndShapeInfo, outs: ptr csize_t): OrtStatusPtr =
-  ort_GetDimensionsCount(info, outs)
-
-proc GetDimensions*(info: OrtTensorTypeAndShapeInfo, dim_values: ptr int64, dim_values_length: csize_t): OrtStatusPtr =
-  ort_GetDimensions(info, dim_values, dim_values_length)
-
-proc GetTensorShapeElementCount*(info: OrtTensorTypeAndShapeInfo, outs: ptr csize_t): OrtStatusPtr =
-  ort_GetTensorShapeElementCount(info, outs)
-
-proc GetErrorMessage*(status: OrtStatusPtr): cstring = ort_GetErrorMessage(status)
-
-proc ReleaseStatus*(status: OrtStatusPtr) = ort_ReleaseStatus(status)
-
-# Helper proc to check status and raise exception on error
 proc checkStatus*(status: OrtStatusPtr) =
+  ## Check status and raise exception on error
   if status != nil:
     let msg = $GetErrorMessage(status)
     ReleaseStatus(status)
-    raise newException(Exception, msg)
-
-#------------------------------------------------------------------------------
-# Automatic resource management with destroy hooks
-#------------------------------------------------------------------------------
+    raise newException(CatchableError, msg)
 
 proc `=destroy`*(info: OrtMemoryInfoObj) =
-  ## Automatically release memory info when it goes out of scope
   let ptrInfo = cast[OrtMemoryInfo](addr info)
   if ptrInfo != nil:
-    ort_ReleaseMemoryInfo(ptrInfo)
+    ReleaseMemoryInfo(ptrInfo)
 
 proc `=destroy`*(value: OrtValueObj) =
-  ## Automatically release tensor value when it goes out of scope
   let ptrValue = cast[OrtValue](addr value)
   if ptrValue != nil:
-    ort_ReleaseValue(ptrValue)
+    ReleaseValue(ptrValue)
 
 proc `=destroy`*(session: OrtSessionObj) =
-  ## Automatically release session when it goes out of scope
   let ptrSession = cast[OrtSession](addr session)
   if ptrSession != nil:
-    ort_ReleaseSession(ptrSession)
+    ReleaseSession(ptrSession)
 
 proc `=destroy`*(typeInfo: OrtTypeInfoObj) =
-  ## Automatically release type info when it goes out of scope
   let ptrTypeInfo = cast[OrtTypeInfo](addr typeInfo)
   if ptrTypeInfo != nil:
-    ort_ReleaseTypeInfo(ptrTypeInfo)
+    ReleaseTypeInfo(ptrTypeInfo)
 
 proc `=destroy`*(tensorInfo: OrtTensorTypeAndShapeInfoObj) =
-  ## Automatically release tensor shape info when it goes out of scope
   let ptrTensorInfo = cast[OrtTensorTypeAndShapeInfo](addr tensorInfo)
   if ptrTensorInfo != nil:
-    ort_ReleaseTensorTypeAndShapeInfo(ptrTensorInfo)
+    ReleaseTensorTypeAndShapeInfo(ptrTensorInfo)
 
 proc `=destroy`*(options: OrtSessionOptionsObj) =
-  ## Automatically release session options when it goes out of scope
   let ptrOptions = cast[OrtSessionOptions](addr options)
   if ptrOptions != nil:
-    ort_ReleaseSessionOptions(ptrOptions)
+    ReleaseSessionOptions(ptrOptions)
 
 proc `=destroy`*(allocator: OrtAllocatorObj) =
-  ## Automatically release allocator when it goes out of scope
   let ptrAllocator = cast[OrtAllocator](addr allocator)
   if ptrAllocator != nil:
-    ort_ReleaseAllocator(ptrAllocator)
-
-
+    ReleaseAllocator(ptrAllocator)

@@ -5,9 +5,13 @@ description   = "ONNX Runtime wrapper for Nim - High-level interface for loading
 license       = "MIT"
 srcDir        = "src"
 
+installExt = @["nim", "c"]
+
 # Dependencies
-requires "nim >= 2.0.0"
-requires "https://github.com/arnetheduck/nim-fftr"
+requires "nim >= 2.2.0"
+
+# whisper utils requires
+# requires "https://github.com/arnetheduck/nim-fftr"
 
 # System dependency note:
 # This package requires ONNX Runtime C library to be installed on your system.

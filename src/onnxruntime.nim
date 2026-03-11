@@ -33,82 +33,32 @@ export runInferenceMultiInput, NamedInputTensor
 export getModelOutputNames, checkStatus, getSession, ReleaseValue
 
 
-## High-level Model type that wraps the low-level OnnxModel
 type
   Model* = ref object
     ## High-level wrapper for an ONNX model session.
     ## Provides a clean API for inference without manual error handling.
-    internal*: OnnxModel  ## Internal low-level model (exposed for advanced use)
+    internal*: OnnxModel
 
-## Tensor type aliases for cleaner API
 type
   InputTensor* = OnnxInputTensor
-    ## Input tensor for model inference
   OutputTensor* = OnnxOutputTensor
-    ## Output tensor from model inference
-
-#------------------------------------------------------------------------------
-# Model Loading
-#------------------------------------------------------------------------------
 
 proc loadModel*(path: string, useCuda: bool = false, useCoreML: bool = false): Model =
   ## Load an ONNX model from a file path.
-  ##
-  ## Parameters:
-  ##   path: Path to the .onnx model file
-  ##   useCuda: Enable CUDA GPU acceleration (NVIDIA only, default: false)
-  ##   useCoreML: Enable CoreML GPU acceleration (macOS only, default: false)
-  ##
-  ## Returns:
-  ##   A Model object ready for inference
-  ##
-  ## Raises:
-  ##   OnnxRuntimeError: If the model fails to load
-  ##
-  ## Example:
-  ##   let model = loadModel("models/gpt2.onnx")
-  ##   # With CUDA GPU acceleration (NVIDIA)
-  ##   let model = loadModel("models/gpt2.onnx", useCuda=true)
-  ##   # With CoreML GPU acceleration (macOS)
-  ##   let model = loadModel("models/gpt2.onnx", useCoreML=true)
   result = Model(internal: newOnnxModel(path, useCuda, useCoreML))
 
 proc close*(model: Model) =
   ## Release the model and free associated resources.
-  ##
-  ## Example:
-  ##   model.close()
   if model != nil and model.internal != nil:
     model.internal.close()
 
-#------------------------------------------------------------------------------
-# Tensor Creation Helpers
-#------------------------------------------------------------------------------
-
 proc newInputTensor*(data: seq[int64], shape: seq[int64]): InputTensor =
   ## Create a new input tensor with the given data and shape.
-  ##
-  ## Parameters:
-  ##   data: Flattened array of int64 values (e.g., token IDs)
-  ##   shape: Tensor shape (e.g., @[batch_size, sequence_length])
-  ##
-  ## Returns:
-  ##   An InputTensor ready for model inference
-  ##
-  ## Example:
-  ##   let input = newInputTensor(@[1'i64, 2, 3], shape = @[1'i64, 3])
   result = InputTensor(data: data, shape: shape)
 
 proc newInputTensor*(data: seq[float32], shape: seq[int64]): InputTensor =
   ## Create a new input tensor with float32 data.
   ## Note: Data is converted to int64 format internally for compatibility.
-  ##
-  ## Parameters:
-  ##   data: Flattened array of float32 values
-  ##   shape: Tensor shape
-  ##
-  ## Returns:
-  ##   An InputTensor with data converted to int64
   var intData = newSeq[int64](data.len)
   for i in 0 ..< data.len:
     intData[i] = data[i].int64
@@ -116,56 +66,15 @@ proc newInputTensor*(data: seq[float32], shape: seq[int64]): InputTensor =
 
 proc newOutputTensor*(data: seq[float32], shape: seq[int64]): OutputTensor =
   ## Create a new output tensor (mainly for testing/debugging).
-  ##
-  ## Parameters:
-  ##   data: Flattened array of float32 values
-  ##   shape: Tensor shape
-  ##
-  ## Returns:
-  ##   An OutputTensor
   result = OnnxOutputTensor(data: data, shape: shape)
-
-#------------------------------------------------------------------------------
-# Basic Inference
-#------------------------------------------------------------------------------
 
 proc run*(model: Model, input: InputTensor, inputName = "input", outputName = "output"): OutputTensor =
   ## Run inference on the model with a single input tensor.
-  ##
-  ## Parameters:
-  ##   input: The input tensor data and shape
-  ##   inputName: Name of the input node in the ONNX graph (default: "input")
-  ##   outputName: Name of the output node in the ONNX graph (default: "output")
-  ##
-  ## Returns:
-  ##   The output tensor with model predictions
-  ##
-  ## Raises:
-  ##   OnnxRuntimeError: If inference fails
-  ##
-  ## Example:
-  ##   let input = newInputTensor(@[1'i64, 2, 3], shape = @[1'i64, 3])
-  ##   let output = model.run(input)
   result = runInference(model.internal, input, inputName, outputName)
-
-#------------------------------------------------------------------------------
-# Model Introspection
-#------------------------------------------------------------------------------
 
 proc getOutputNames*(model: Model): seq[string] =
   ## Get the names of all output nodes in the model.
-  ##
-  ## Returns:
-  ##   Sequence of output node names
-  ##
-  ## Example:
-  ##   let outputs = model.getOutputNames()
-  ##   echo "Model outputs: ", outputs
   result = getModelOutputNames(model.internal)
-
-#------------------------------------------------------------------------------
-# Shape and Data Access Helpers
-#------------------------------------------------------------------------------
 
 proc batchSize*(tensor: OutputTensor): int64 =
   ## Get the batch size from the output tensor shape.
