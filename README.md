@@ -176,19 +176,20 @@ tests/testdata/piper-voices
 └── zh_CN-chaowen-medium.onnx.json
 ```
 
-ASR Example (not work): Download the Whisper ASR model from [Hugging Face](https://huggingface.co/onnx-community/whisper-large-v3-chinese-ONNX/):
+ASR Example: Download the Whisper ASR model from [Hugging Face](https://huggingface.co/onnx-community/whisper-large-v3-chinese-ONNX/):
 
 below are the files you need to download:
 
 ```bash
-tests/testdata/onnx-community/whisper-large-v3-chinese-ONNX
-├── config.json
-├── generation_config.json
-├── special_tokens_map.json
-├── tokenizer.json
-├── vocab.json
-├── encoder_model.onnx
-└── decoder_model.onnx
+tests/testdata/whisper-large-v3-zh
+├── test_input.wav  # Your test audio file (16kHz, 16-bit PCM WAV)
+└── onnx-community/whisper-large-v3-chinese-ONNX
+    ├── generation_config.json
+    ├── tokenizer.json
+    ├── vocab.json
+    └── onnx
+        ├── encoder_model.onnx
+        └── decoder_model.onnx
 ```
 
 Classification Example: Download the URL-TITLE-classifier model from [Hugging Face](https://huggingface.co/firefoxrecap/URL-TITLE-classifier):
