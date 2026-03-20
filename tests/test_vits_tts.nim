@@ -1,11 +1,9 @@
-## test_vits_tts.nim
-## Test Text-to-Speech inference using Sherpa-ONNX VITS model
 ##
 ## NOTE: MeloTTS model (vits-melo-tts-zh_en) has a known issue where it only
 ## produces "a" sounds because it was exported without BERT embeddings.
 ## See: notes/ISSUE.md
 ##
-## This test uses sherpa-onnx-vits-zh-ll which works correctly.
+
 
 import unittest
 import os

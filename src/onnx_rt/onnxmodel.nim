@@ -219,11 +219,10 @@ proc runInference*(
     ReleaseTypeInfo(typeInfo)
   
   # Cast to tensor info to get shape and data
+  # Note: tensorInfo is just a view into typeInfo, don't release it separately
   var tensorInfo: OrtTensorTypeAndShapeInfo
   status = CastTypeInfoToTensorInfo(typeInfo, tensorInfo.addr)
   checkStatus(status)
-  defer:
-    ReleaseTensorTypeAndShapeInfo(tensorInfo)
   
   # Get output tensor dimensions
   var dimsCount: csize_t
@@ -632,11 +631,10 @@ proc runInferenceNeoComplete*(
   defer:
     ReleaseTypeInfo(typeInfo)
   
+  # Note: tensorInfo is just a view into typeInfo, don't release it separately
   var tensorInfo: OrtTensorTypeAndShapeInfo
   status = CastTypeInfoToTensorInfo(typeInfo, tensorInfo.addr)
   checkStatus(status)
-  defer:
-    ReleaseTensorTypeAndShapeInfo(tensorInfo)
   
   var dimsCount: csize_t
   status = GetDimensionsCount(tensorInfo, dimsCount.addr)
