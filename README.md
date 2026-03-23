@@ -222,3 +222,33 @@ tests/testdata/vits-icefall-zh-aishell3
 ├── test_output.wav
 └── tokens.txt
 ```
+
+TTS Example: Kokoro-82M-ONNX (English TTS, high quality, 82M parameters)
+
+Download from [Hugging Face](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX):
+
+```bash
+tests/testdata/kokoro-82m
+├── model.onnx  # or model_quantized.onnx (smaller, faster)
+└── voices/
+    └── af.bin  # Voice file (American Female)
+```
+
+Kokoro-82M is a compact (82M params) yet high-quality English TTS model supporting multiple voices and 24kHz output.
+
+TTS Example: Sherpa-ONNX Kokoro Multi-Lang v1.0 (Chinese + English, 53 speakers)
+
+Download from [sherpa-onnx releases](https://github.com/k2-fsa/sherpa-onnx/releases/tag/tts-models):
+
+```bash
+tests/testdata/kokoro-multi-lang
+├── model.onnx              # ONNX model
+├── voices.bin              # Voice vectors (53 speakers)
+├── tokens.txt              # Token to ID mapping
+├── lexicon-zh.txt          # Chinese lexicon
+├── lexicon-us-en.txt       # English lexicon
+├── espeak-ng-data/         # espeak-ng data
+└── dict/                   # Dictionary files
+```
+
+Sherpa-ONNX Kokoro Multi-Lang is a multilingual TTS model supporting Chinese-English mixed text input with 53 different speakers. Unlike the HuggingFace version, you can input raw text directly without external phonemizer.
